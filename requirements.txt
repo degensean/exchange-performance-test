@@ -1,0 +1,6 @@
+binance-connector
+hyperliquid-python-sdk
+python-dotenv
+websockets
+aiohttp
+rich
