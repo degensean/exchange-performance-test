@@ -18,8 +18,6 @@ from hyperliquid.exchange import Exchange
 from hyperliquid.utils import constants
 import eth_account
 from eth_account.signers.local import LocalAccount
-from eth_account.account_local_actions import AccountLocalActions
-from eth_keys.datatypes import PrivateKey
 from rich.live import Live
 from rich.table import Table
 from rich.console import Console
@@ -104,8 +102,6 @@ class BinanceExchange(BaseExchange):
     
     def _get_tick_size(self, price: float) -> float:
         """Get tick size for BTCUSDT on Binance Futures"""
-        # For BTCUSDT futures, tick size is typically 0.10 for prices >= 1000
-        # and 0.01 for prices < 1000
         if price >= 1000:
             return 0.10
         else:
@@ -119,27 +115,18 @@ class BinanceExchange(BaseExchange):
     def _extract_bids_asks(self, orderbook_data):
         """Extract bids and asks from Binance orderbook data"""
         try:
-            # Binance WebSocket format: 'b' for bids, 'a' for asks
             if 'b' in orderbook_data and 'a' in orderbook_data:
                 return orderbook_data['b'], orderbook_data['a']
-            # Alternative format
             elif 'bids' in orderbook_data and 'asks' in orderbook_data:
                 return orderbook_data['bids'], orderbook_data['asks']
-            # Nested data format
-            elif 'data' in orderbook_data and isinstance(orderbook_data['data'], dict):
-                nested_data = orderbook_data['data']
-                if 'bids' in nested_data and 'asks' in nested_data:
-                    return nested_data['bids'], nested_data['asks']
-        except Exception as e:
-            print(f"Error extracting bids/asks from Binance data: {e}")
+        except Exception:
+            pass
         return None, None
     
     async def test_orderbook_latency(self) -> None:
         """Test Binance futures orderbook latency via websocket"""
-        print(f"[DEBUG] {self.name} orderbook test starting...")
         try:
             uri = f"{self.ws_url}{self.symbol.lower()}@depth5@100ms"
-            print(f"[DEBUG] Connecting to {uri}")
             
             async with websockets.connect(uri) as websocket:
                 start_time = time.time()
@@ -147,54 +134,24 @@ class BinanceExchange(BaseExchange):
                 latency = time.time() - start_time
                 
                 data = json.loads(message)
-                print(f"[DEBUG] {self.name} received data keys: {list(data.keys())}")
-                
-                # Store the latest orderbook data
                 self.latest_orderbook = data
                 
-                # Check for Binance futures WebSocket format: 'b' for bids, 'a' for asks
                 if 'b' in data and 'a' in data:
                     self.latency_data.orderbook.append(latency)
-                    # Calculate and store latest price
                     self.latest_price = self.get_mid_price_from_orderbook()
-                    print(f"[DEBUG] {self.name} orderbook success: {latency:.4f}s, price: {self.latest_price}")
-                elif 'bids' in data and 'asks' in data:
-                    # Alternative format
-                    self.latency_data.orderbook.append(latency)
-                    self.latest_price = self.get_mid_price_from_orderbook()
-                    print(f"[DEBUG] {self.name} orderbook success (alt format): {latency:.4f}s, price: {self.latest_price}")
-                elif 'data' in data and isinstance(data['data'], dict):
-                    # Check if data is nested
-                    nested_data = data['data']
-                    if 'bids' in nested_data and 'asks' in nested_data:
-                        self.latency_data.orderbook.append(latency)
-                        self.latest_price = self.get_mid_price_from_orderbook()
-                        print(f"[DEBUG] {self.name} orderbook success (nested): {latency:.4f}s, price: {self.latest_price}")
-                    else:
-                        print(f"[DEBUG] {self.name} nested data missing bids/asks: {list(nested_data.keys())}")
-                else:
-                    print(f"[DEBUG] {self.name} orderbook data structure unknown: {data}")
                     
-        except Exception as e:
-            print(f"Binance orderbook error: {e}")
+        except Exception:
+            pass
     
     async def test_order_latency(self) -> None:
         """Test Binance futures order placement and cancellation latency"""
-        print(f"[DEBUG] {self.name} order test starting...")
-        
-        # Use latest price from orderbook if available
-        current_price = self.latest_price
-        if not current_price:
-            print(f"[DEBUG] {self.name} no current price available from orderbook")
+        if not self.latest_price:
             return
         
-        # Place order far below market price to avoid execution
-        raw_price = current_price * 0.95  # 5% below market
-        price = self._round_to_tick_size(raw_price)  # Round to valid tick size
-        print(f"[DEBUG] {self.name} attempting order at price {price} (rounded from {raw_price})")
+        raw_price = self.latest_price * 0.95  # 5% below market
+        price = self._round_to_tick_size(raw_price)
         
         try:
-            # Prepare order parameters
             timestamp = int(time.time() * 1000)
             params = {
                 'symbol': self.symbol,
@@ -206,13 +163,9 @@ class BinanceExchange(BaseExchange):
                 'timestamp': timestamp
             }
             
-            # Create query string and signature
             query_string = urllib.parse.urlencode(params)
             signature = self._generate_signature(query_string)
             params['signature'] = signature
-            
-            # Place order
-            start_time = time.time()
             
             headers = {
                 'X-MBX-APIKEY': self.api_key,
@@ -220,6 +173,7 @@ class BinanceExchange(BaseExchange):
             }
             
             async with aiohttp.ClientSession() as session:
+                start_time = time.time()
                 async with session.post(
                     f"{self.base_url_pm}/papi/v1/um/order",
                     headers=headers,
@@ -231,7 +185,6 @@ class BinanceExchange(BaseExchange):
                         order_data = await response.json()
                         self.latency_data.place_order.append(place_latency)
                         
-                        # Track the order for cleanup
                         order_id = order_data['orderId']
                         self.open_orders.append({
                             'id': order_id,
@@ -260,21 +213,15 @@ class BinanceExchange(BaseExchange):
                             
                             if cancel_response.status == 200:
                                 self.latency_data.cancel_order.append(cancel_latency)
-                                # Remove from open orders tracking
                                 self.open_orders = [o for o in self.open_orders if o['id'] != order_id]
-                    else:
-                        error_text = await response.text()
-                        print(f"Binance order error: {response.status} - {error_text}")
                         
-        except Exception as e:
-            print(f"Binance order error: {e}")
+        except Exception:
+            pass
     
     async def cleanup_open_orders(self):
         """Cancel all open Binance orders"""
         if not self.open_orders:
             return
-        
-        print(f"[DEBUG] {self.name} cleaning up {len(self.open_orders)} open orders...")
         
         headers = {
             'X-MBX-APIKEY': self.api_key,
@@ -282,7 +229,7 @@ class BinanceExchange(BaseExchange):
         }
         
         async with aiohttp.ClientSession() as session:
-            for order in self.open_orders[:]:  # Copy list to avoid modification during iteration
+            for order in self.open_orders[:]:
                 try:
                     cancel_params = {
                         'symbol': order['symbol'],
@@ -300,14 +247,10 @@ class BinanceExchange(BaseExchange):
                         data=cancel_params
                     ) as cancel_response:
                         if cancel_response.status == 200:
-                            print(f"[DEBUG] {self.name} cancelled order {order['id']}")
                             self.open_orders.remove(order)
-                        else:
-                            error_text = await cancel_response.text()
-                            print(f"[DEBUG] {self.name} failed to cancel order {order['id']}: {error_text}")
                             
-                except Exception as e:
-                    print(f"[DEBUG] {self.name} error cancelling order {order['id']}: {e}")
+                except Exception:
+                    pass
 
 class HyperliquidExchange(BaseExchange):
     """Hyperliquid exchange implementation"""
@@ -323,122 +266,64 @@ class HyperliquidExchange(BaseExchange):
         self.account: LocalAccount = eth_account.Account.from_key(private_key)
         self.exchange = Exchange(self.account, constants.MAINNET_API_URL, account_address=wallet_address)
 
+    def _get_tick_size(self, asset: str = "BTC") -> float:
+        """Get the correct tick size for Hyperliquid assets"""
+        if asset == "BTC":
+            # BTC on Hyperliquid typically uses $1 tick size
+            return 1.0
+        return 0.01  # Default for other assets
+
+    def _round_to_tick_size(self, price: float, asset: str = "BTC") -> float:
+        """Round price to the nearest valid tick size"""
+        tick_size = self._get_tick_size(asset)
+        return round(price / tick_size) * tick_size
+
     def _extract_bids_asks(self, orderbook_data):
         """Extract bids and asks from Hyperliquid orderbook data"""
         try:
-            # Check if orderbook_data has 'levels' key with [bids, asks] structure
             if isinstance(orderbook_data, dict) and 'levels' in orderbook_data:
                 levels = orderbook_data['levels']
-                # levels should be [bids_list, asks_list]
                 if isinstance(levels, list) and len(levels) == 2:
                     bids_data, asks_data = levels[0], levels[1]
                     
-                    # Convert to standard format [[price, size], ...]
                     bids = []
                     asks = []
                     
-                    # Process bids
-                    if isinstance(bids_data, list):
-                        for bid in bids_data:
-                            if isinstance(bid, dict) and 'px' in bid and 'sz' in bid:
-                                bids.append([bid['px'], bid['sz']])
-                            elif isinstance(bid, list) and len(bid) >= 2:
-                                bids.append([bid[0], bid[1]])
+                    for bid in bids_data:
+                        if isinstance(bid, dict) and 'px' in bid and 'sz' in bid:
+                            bids.append([bid['px'], bid['sz']])
                     
-                    # Process asks
-                    if isinstance(asks_data, list):
-                        for ask in asks_data:
-                            if isinstance(ask, dict) and 'px' in ask and 'sz' in ask:
-                                asks.append([ask['px'], ask['sz']])
-                            elif isinstance(ask, list) and len(ask) >= 2:
-                                asks.append([ask[0], ask[1]])
+                    for ask in asks_data:
+                        if isinstance(ask, dict) and 'px' in ask and 'sz' in ask:
+                            asks.append([ask['px'], ask['sz']])
                     
                     return bids, asks
-                
-                # Alternative: levels is a flat list with side indicators
-                else:
-                    bids = [[level['px'], level['sz']] for level in levels if level.get('side') == 'B']
-                    asks = [[level['px'], level['sz']] for level in levels if level.get('side') == 'A']
-                    return bids, asks
-            
-            # Direct list format
-            elif isinstance(orderbook_data, list):
-                bids = []
-                asks = []
-                
-                for level in orderbook_data:
-                    if isinstance(level, dict):
-                        # Format: {'px': price, 'sz': size, 'side': 'B'/'A'}
-                        if level.get('side') == 'B':
-                            bids.append([level['px'], level['sz']])
-                        elif level.get('side') == 'A':
-                            asks.append([level['px'], level['sz']])
-                    elif isinstance(level, list) and len(level) >= 3:
-                        # Format: [price, size, side]
-                        price, size, side = level[0], level[1], level[2]
-                        if side == 'B' or side == 0:
-                            bids.append([price, size])
-                        elif side == 'A' or side == 1:
-                            asks.append([price, size])
-                
-                return bids, asks
-            
-            # Standard format with direct bids/asks keys
-            elif isinstance(orderbook_data, dict) and 'bids' in orderbook_data and 'asks' in orderbook_data:
-                return orderbook_data['bids'], orderbook_data['asks']
-            
-        except Exception as e:
-            print(f"Error extracting bids/asks from Hyperliquid data: {e}")
-            print(f"[DEBUG] Hyperliquid data structure: {type(orderbook_data)} - {orderbook_data}")
+        except Exception:
+            pass
         return None, None
 
-    def get_current_price(self) -> Optional[float]:
-        """Get current BTC price from Hyperliquid"""
-        try:
-            ticker = self.info.all_mids()
-            return float(ticker[self.asset])
-        except Exception as e:
-            print(f"Error getting Hyperliquid price: {e}")
-            return None
-    
     async def test_orderbook_latency(self) -> None:
         """Test Hyperliquid orderbook latency"""
-        print(f"[DEBUG] {self.name} orderbook test starting...")
         try:
             start_time = time.time()
-            # Get L2 book data
             l2_data = self.info.l2_snapshot(self.asset)
             latency = time.time() - start_time
             
             if l2_data:
-                # Store the latest orderbook data
                 self.latest_orderbook = l2_data
                 self.latency_data.orderbook.append(latency)
-                # Calculate and store latest price
                 self.latest_price = self.get_mid_price_from_orderbook()
-                print(f"[DEBUG] {self.name} orderbook success: {latency:.4f}s, price: {self.latest_price}")
-            else:
-                print(f"[DEBUG] {self.name} orderbook returned no data")
         except Exception as e:
-            print(f"Hyperliquid orderbook error: {e}")
+            pass  # Silent error handling for performance testing
     
     async def test_order_latency(self) -> None:
         """Test Hyperliquid order placement and cancellation latency"""
-        print(f"[DEBUG] {self.name} order test starting...")
-        if not self.exchange:
-            print(f"[DEBUG] {self.name} exchange client not initialized")
-            return
-            
-        # Use latest price from orderbook if available
-        current_price = self.latest_price
-        if not current_price:
-            print(f"[DEBUG] {self.name} no current price available from orderbook")
+        if not self.exchange or not self.latest_price:
             return
         
-        # Place order far below market price to avoid execution
-        # Round price to 2 decimal places for BTC (typical for Hyperliquid)
-        price = round(current_price * 0.95, 2)  # 5% below market, rounded to 2 decimals
-        print(f"[DEBUG] {self.name} attempting order at price {price}")
+        # Place order 5% below market to avoid execution
+        raw_price = self.latest_price * 0.95
+        price = self._round_to_tick_size(raw_price, self.asset)
         
         try:
             # Place order
@@ -446,7 +331,7 @@ class HyperliquidExchange(BaseExchange):
             result = self.exchange.order(
                 name=self.asset,
                 is_buy=True,
-                sz=0.01,
+                sz=0.001,
                 limit_px=price,
                 order_type={"limit": {"tif": "Gtc"}},
                 reduce_only=False
@@ -456,53 +341,42 @@ class HyperliquidExchange(BaseExchange):
                 place_latency = time.time() - start_time
                 self.latency_data.place_order.append(place_latency)
                 
-                # Try to cancel order
+                # Try to cancel order immediately
                 statuses = result.get("response", {}).get("data", {}).get("statuses", [])
-                if statuses:
-                    status = statuses[0]
-                    if "resting" in status:
-                        order_id = status["resting"]["oid"]
-                        
-                        # Track the order for cleanup
-                        self.open_orders.append({
-                            'id': order_id,
-                            'asset': self.asset,
-                            'exchange': 'hyperliquid'
-                        })
-                        
-                        start_time = time.time()
-                        cancel_result = self.exchange.cancel(self.asset, order_id)
-                        cancel_latency = time.time() - start_time
-                        
-                        # Check if cancellation was successful
-                        if cancel_result and cancel_result.get("status") == "ok":
-                            self.latency_data.cancel_order.append(cancel_latency)
-                            # Remove from open orders tracking
-                            self.open_orders = [o for o in self.open_orders if o['id'] != order_id]
-            else:
-                print(f"Hyperliquid order failed: {result}")
+                if statuses and "resting" in statuses[0]:
+                    order_id = statuses[0]["resting"]["oid"]
+                    
+                    # Track for cleanup
+                    self.open_orders.append({
+                        'id': order_id,
+                        'asset': self.asset,
+                        'exchange': 'hyperliquid'
+                    })
+                    
+                    # Cancel order
+                    start_time = time.time()
+                    cancel_result = self.exchange.cancel(self.asset, order_id)
+                    cancel_latency = time.time() - start_time
+                    
+                    if cancel_result and cancel_result.get("status") == "ok":
+                        self.latency_data.cancel_order.append(cancel_latency)
+                        self.open_orders = [o for o in self.open_orders if o['id'] != order_id]
             
         except Exception as e:
-            print(f"Hyperliquid order error: {e}")
+            pass  # Silent error handling for performance testing
     
     async def cleanup_open_orders(self):
         """Cancel all open Hyperliquid orders"""
         if not self.open_orders:
             return
         
-        print(f"[DEBUG] {self.name} cleaning up {len(self.open_orders)} open orders...")
-        
-        for order in self.open_orders[:]:  # Copy list to avoid modification during iteration
+        for order in self.open_orders[:]:
             try:
                 result = self.exchange.cancel(order['asset'], order['id'])
                 if result and result.get("status") == "ok":
-                    print(f"[DEBUG] {self.name} cancelled order {order['id']}")
                     self.open_orders.remove(order)
-                else:
-                    print(f"[DEBUG] {self.name} failed to cancel order {order['id']}: {result}")
-                    
-            except Exception as e:
-                print(f"[DEBUG] {self.name} error cancelling order {order['id']}: {e}")
+            except Exception:
+                pass
 
 class PerformanceTester:
     """Main performance testing class"""
@@ -522,7 +396,6 @@ class PerformanceTester:
     def _setup_signal_handlers(self):
         """Setup signal handlers for graceful shutdown"""
         def signal_handler(signum, frame):
-            print(f"\n[DEBUG] Received signal {signum}, initiating graceful shutdown...")
             self.running = False
         
         signal.signal(signal.SIGINT, signal_handler)
@@ -530,16 +403,13 @@ class PerformanceTester:
     
     async def cleanup_all_orders(self):
         """Cleanup all open orders from all exchanges"""
-        print("[DEBUG] Cleaning up all open orders...")
         cleanup_tasks = []
-        
         for exchange in self.exchanges:
             if exchange.open_orders:
                 cleanup_tasks.append(exchange.cleanup_open_orders())
         
         if cleanup_tasks:
             await asyncio.gather(*cleanup_tasks, return_exceptions=True)
-        print("[DEBUG] Order cleanup completed.")
     
     def _initialize_exchanges(self):
         """Initialize exchange instances"""
@@ -625,7 +495,8 @@ class PerformanceTester:
         for exchange in self.exchanges:
             test_functions.extend([
                 exchange.test_orderbook_latency,
-                exchange.test_order_latency
+                exchange.test_order_latency,
+                exchange.test_order_latency,  # Test order placement more frequently
             ])
         
         try:
@@ -636,14 +507,14 @@ class PerformanceTester:
                     
                     try:
                         await test_func()
-                    except Exception as e:
-                        self.console.print(f"[red]Test error: {e}[/red]")
+                    except Exception:
+                        pass  # Silent error handling for performance testing
                     
                     # Update display
                     live.update(self.generate_stats_table())
                     
                     # Wait before next test
-                    await asyncio.sleep(random.uniform(0.5, 1.5))
+                    await asyncio.sleep(random.uniform(0.1, 0.3))
 
             self.console.print("[green]Test completed![/green]")
         
@@ -653,7 +524,7 @@ class PerformanceTester:
 
 async def main():
     """Main entry point"""
-    tester = PerformanceTester(duration_seconds=60)
+    tester = PerformanceTester(duration_seconds=600)
     await tester.run_test()
 
 if __name__ == "__main__":
