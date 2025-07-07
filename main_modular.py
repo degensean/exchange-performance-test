@@ -6,7 +6,10 @@ A modular framework for testing latency across multiple cryptocurrency exchanges
 Supports Binance and Hyperliquid with extensible architecture for adding more exchanges.
 
 Usage:
-    python main_modular.py
+    python main_modular.py [--duration SECONDS]
+
+    Options:
+        --duration SECONDS    Test duration in seconds (default: unlimited)
 
 Configuration:
     Set environment variables in .env file:
@@ -15,6 +18,7 @@ Configuration:
 """
 
 import asyncio
+import argparse
 from dotenv import load_dotenv
 from src.performance_tester import PerformanceTester
 
@@ -22,10 +26,35 @@ from src.performance_tester import PerformanceTester
 load_dotenv()
 
 
+def parse_arguments():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(
+        description="Exchange Performance Testing Framework",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+    python main_modular.py                 # Run unlimited time
+    python main_modular.py --duration 60   # Run for 60 seconds
+        """
+    )
+    
+    parser.add_argument(
+        '--duration',
+        type=int,
+        default=None,
+        help='Test duration in seconds (default: unlimited - run until stopped with Ctrl+C)'
+    )
+    
+    return parser.parse_args()
+
+
 async def main():
     """Main entry point for the performance testing framework"""
-    # Create performance tester with default duration from config
-    tester = PerformanceTester()
+    # Parse command line arguments
+    args = parse_arguments()
+    
+    # Create performance tester with specified or default duration
+    tester = PerformanceTester(duration_seconds=args.duration)
     
     # Run the performance test
     await tester.run_test()

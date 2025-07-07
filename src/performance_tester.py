@@ -16,7 +16,7 @@ class PerformanceTester:
     """Main performance testing class"""
     
     def __init__(self, duration_seconds: int | None = None):
-        self.duration_seconds = duration_seconds or DEFAULT_TEST_DURATION
+        self.duration_seconds = duration_seconds if duration_seconds is not None else DEFAULT_TEST_DURATION
         self.exchanges: List[BaseExchange] = []
         self.console = Console()
         self.running = True
@@ -228,7 +228,10 @@ class PerformanceTester:
             self.console.print("[red]No exchanges configured. Please check your .env file.[/red]")
             return
         
-        self.console.print(f"[green]Starting performance test for {self.duration_seconds} seconds...[/green]")
+        if self.duration_seconds is None:
+            self.console.print("[green]Starting unlimited performance test (press Ctrl+C to stop)...[/green]")
+        else:
+            self.console.print(f"[green]Starting performance test for {self.duration_seconds} seconds...[/green]")
         
         start_time = time.time()
         
@@ -243,7 +246,11 @@ class PerformanceTester:
         
         try:
             with Live(self.generate_stats_table(), refresh_per_second=REFRESH_RATE, console=self.console) as live:
-                while self.running and (time.time() - start_time < self.duration_seconds):
+                while self.running:
+                    # Check if we should stop based on duration (if not unlimited)
+                    if self.duration_seconds is not None and (time.time() - start_time >= self.duration_seconds):
+                        break
+                        
                     # Randomly select a test function
                     test_func = random.choice(test_functions)
                     

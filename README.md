@@ -39,13 +39,13 @@ Edit `src/config.py` to customize:
 
 ```python
 # Test Configuration
-DEFAULT_TEST_DURATION = 600  # 10 minutes
-ORDER_SIZE_BTC = 0.001       # 0.001 BTC orders
-MARKET_OFFSET = 0.95         # Place orders 5% below market
+DEFAULT_TEST_DURATION = None  # Unlimited time (None = run until stopped)
+ORDER_SIZE_BTC = 0.001         # 0.001 BTC orders
+MARKET_OFFSET = 0.95           # Place orders 5% below market
 
 # Display Configuration
-REFRESH_RATE = 2             # Updates per second
-DECIMAL_PLACES = 4           # Precision for latency display
+REFRESH_RATE = 2               # Updates per second
+DECIMAL_PLACES = 4             # Precision for latency display
 ```
 
 ## 📈 **Advanced Statistical Metrics**
@@ -70,6 +70,18 @@ The framework provides comprehensive statistical analysis for performance assess
 - **High P99 vs P95**: Occasional severe outliers, potential timeouts
 
 ## 🌟 **Usage**
+
+### Command Line Options
+```bash
+# Run unlimited time (default)
+python main_modular.py
+
+# Run for specific duration
+python main_modular.py --duration 60    # 60 seconds
+
+# Show help
+python main_modular.py --help
+```
 
 ### Quick Start
 ```bash

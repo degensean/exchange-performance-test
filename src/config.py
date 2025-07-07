@@ -3,7 +3,7 @@ Configuration settings for the exchange performance testing framework
 """
 
 # Test Configuration
-DEFAULT_TEST_DURATION = 600  # 10 minutes in seconds
+DEFAULT_TEST_DURATION = None  # Unlimited time (None = run until stopped)
 TEST_INTERVAL_MIN = 0.5      # Minimum seconds between tests
 TEST_INTERVAL_MAX = 1.0      # Maximum seconds between tests
 ORDER_SIZE_BTC = 0.001       # BTC order size for testing
