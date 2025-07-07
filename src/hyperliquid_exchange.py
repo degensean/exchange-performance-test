@@ -60,18 +60,25 @@ class HyperliquidExchange(BaseExchange):
     async def test_orderbook_latency(self) -> None:
         """Test Hyperliquid orderbook latency"""
         self.failure_data.orderbook_total += 1
+        start_time = time.time()
         try:
-            start_time = time.time()
             l2_data = self.info.l2_snapshot(self.asset)
             latency = time.time() - start_time
             
+            # Always record total request latency (success + failures)
+            self.latency_data.orderbook_total.append(latency)
+            
             if l2_data:
-                self.latest_orderbook = l2_data
+                # Record success-only latency
                 self.latency_data.orderbook.append(latency)
+                self.latest_orderbook = l2_data
                 self.latest_price = self.get_mid_price_from_orderbook()
             else:
                 self.failure_data.orderbook_failures += 1
         except Exception:
+            latency = time.time() - start_time
+            # Record total request latency even for exceptions
+            self.latency_data.orderbook_total.append(latency)
             self.failure_data.orderbook_failures += 1
     
     async def test_order_latency(self) -> None:
@@ -84,9 +91,9 @@ class HyperliquidExchange(BaseExchange):
         price = self._round_to_tick_size(raw_price, self.asset)
         
         self.failure_data.place_order_total += 1
+        start_time = time.time()
         try:
             # Place order
-            start_time = time.time()
             result = self.exchange.order(
                 name=self.asset,
                 is_buy=True,
@@ -95,9 +102,13 @@ class HyperliquidExchange(BaseExchange):
                 order_type={"limit": {"tif": "Gtc"}},
                 reduce_only=False
             )
+            place_latency = time.time() - start_time
+            
+            # Always record total request latency
+            self.latency_data.place_order_total.append(place_latency)
             
             if result and result.get("status") == "ok":
-                place_latency = time.time() - start_time
+                # Record success-only latency
                 self.latency_data.place_order.append(place_latency)
                 
                 # Try to cancel order immediately
@@ -114,11 +125,15 @@ class HyperliquidExchange(BaseExchange):
                     
                     # Cancel order
                     self.failure_data.cancel_order_total += 1
-                    start_time = time.time()
+                    cancel_start_time = time.time()
                     cancel_result = self.exchange.cancel(self.asset, order_id)
-                    cancel_latency = time.time() - start_time
+                    cancel_latency = time.time() - cancel_start_time
+                    
+                    # Always record total cancel latency
+                    self.latency_data.cancel_order_total.append(cancel_latency)
                     
                     if cancel_result and cancel_result.get("status") == "ok":
+                        # Record success-only cancel latency
                         self.latency_data.cancel_order.append(cancel_latency)
                         self.open_orders = [o for o in self.open_orders if o['id'] != order_id]
                     else:
@@ -129,6 +144,9 @@ class HyperliquidExchange(BaseExchange):
                 self.failure_data.place_order_failures += 1
             
         except Exception:
+            place_latency = time.time() - start_time
+            # Record total request latency even for exceptions
+            self.latency_data.place_order_total.append(place_latency)
             self.failure_data.place_order_failures += 1
     
     async def cleanup_open_orders(self):

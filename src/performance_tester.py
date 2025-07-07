@@ -95,10 +95,11 @@ class PerformanceTester:
         return f"{value:.{DECIMAL_PLACES}f}"
 
     def generate_stats_table(self) -> Table:
-        """Generate statistics table for display"""
-        table = Table(title="Exchange Performance Statistics")
+        """Generate expanded hybrid statistics table for display"""
+        table = Table(title="Exchange Performance Statistics - Hybrid View")
         table.add_column("Exchange", justify="right", style="cyan", no_wrap=True)
         table.add_column("Action", style="magenta")
+        table.add_column("Type", style="white", no_wrap=True)
         table.add_column("Count", justify="right", style="green")
         table.add_column("Min (s)", justify="right", style="green")
         table.add_column("Max (s)", justify="right", style="green")
@@ -110,56 +111,114 @@ class PerformanceTester:
         table.add_column("Failure Rate", justify="right")
         
         for exchange in self.exchanges:
-            # Orderbook stats
-            orderbook_stats = self._calculate_stats(exchange.latency_data.orderbook)
-            failure_rate = exchange.failure_data.get_orderbook_failure_rate()
+            # Orderbook stats - Success Only
+            orderbook_success_stats = self._calculate_stats(exchange.latency_data.orderbook)
+            orderbook_failure_rate = exchange.failure_data.get_orderbook_failure_rate()
             table.add_row(
                 exchange.name,
                 "Orderbook",
-                str(orderbook_stats['count']),
-                self._format_stat_value(orderbook_stats['min']),
-                self._format_stat_value(orderbook_stats['max']),
-                self._format_stat_value(orderbook_stats['mean']),
-                self._format_stat_value(orderbook_stats['median']),
-                self._format_stat_value(orderbook_stats['std_dev']),
-                self._format_stat_value(orderbook_stats['p95']),
-                self._format_stat_value(orderbook_stats['p99']),
-                self._format_failure_rate(failure_rate)
+                "[green]Success Only[/green]",
+                str(orderbook_success_stats['count']),
+                self._format_stat_value(orderbook_success_stats['min']),
+                self._format_stat_value(orderbook_success_stats['max']),
+                self._format_stat_value(orderbook_success_stats['mean']),
+                self._format_stat_value(orderbook_success_stats['median']),
+                self._format_stat_value(orderbook_success_stats['std_dev']),
+                self._format_stat_value(orderbook_success_stats['p95']),
+                self._format_stat_value(orderbook_success_stats['p99']),
+                self._format_failure_rate(orderbook_failure_rate)
             )
             
-            # Place order stats
-            place_order_stats = self._calculate_stats(exchange.latency_data.place_order)
-            failure_rate = exchange.failure_data.get_place_order_failure_rate()
+            # Orderbook stats - Total Requests
+            orderbook_total_stats = self._calculate_stats(exchange.latency_data.orderbook_total)
+            table.add_row(
+                "",
+                "",
+                "[blue]All Requests[/blue]",
+                str(orderbook_total_stats['count']),
+                self._format_stat_value(orderbook_total_stats['min']),
+                self._format_stat_value(orderbook_total_stats['max']),
+                self._format_stat_value(orderbook_total_stats['mean']),
+                self._format_stat_value(orderbook_total_stats['median']),
+                self._format_stat_value(orderbook_total_stats['std_dev']),
+                self._format_stat_value(orderbook_total_stats['p95']),
+                self._format_stat_value(orderbook_total_stats['p99']),
+                "-"
+            )
+            
+            # Place order stats - Success Only
+            place_success_stats = self._calculate_stats(exchange.latency_data.place_order)
+            place_failure_rate = exchange.failure_data.get_place_order_failure_rate()
             table.add_row(
                 "",
                 "Place Order",
-                str(place_order_stats['count']),
-                self._format_stat_value(place_order_stats['min']),
-                self._format_stat_value(place_order_stats['max']),
-                self._format_stat_value(place_order_stats['mean']),
-                self._format_stat_value(place_order_stats['median']),
-                self._format_stat_value(place_order_stats['std_dev']),
-                self._format_stat_value(place_order_stats['p95']),
-                self._format_stat_value(place_order_stats['p99']),
-                self._format_failure_rate(failure_rate)
+                "[green]Success Only[/green]",
+                str(place_success_stats['count']),
+                self._format_stat_value(place_success_stats['min']),
+                self._format_stat_value(place_success_stats['max']),
+                self._format_stat_value(place_success_stats['mean']),
+                self._format_stat_value(place_success_stats['median']),
+                self._format_stat_value(place_success_stats['std_dev']),
+                self._format_stat_value(place_success_stats['p95']),
+                self._format_stat_value(place_success_stats['p99']),
+                self._format_failure_rate(place_failure_rate)
             )
             
-            # Cancel order stats
-            cancel_order_stats = self._calculate_stats(exchange.latency_data.cancel_order)
-            failure_rate = exchange.failure_data.get_cancel_order_failure_rate()
+            # Place order stats - Total Requests
+            place_total_stats = self._calculate_stats(exchange.latency_data.place_order_total)
+            table.add_row(
+                "",
+                "",
+                "[blue]All Requests[/blue]",
+                str(place_total_stats['count']),
+                self._format_stat_value(place_total_stats['min']),
+                self._format_stat_value(place_total_stats['max']),
+                self._format_stat_value(place_total_stats['mean']),
+                self._format_stat_value(place_total_stats['median']),
+                self._format_stat_value(place_total_stats['std_dev']),
+                self._format_stat_value(place_total_stats['p95']),
+                self._format_stat_value(place_total_stats['p99']),
+                "-"
+            )
+            
+            # Cancel order stats - Success Only
+            cancel_success_stats = self._calculate_stats(exchange.latency_data.cancel_order)
+            cancel_failure_rate = exchange.failure_data.get_cancel_order_failure_rate()
             table.add_row(
                 "",
                 "Cancel Order",
-                str(cancel_order_stats['count']),
-                self._format_stat_value(cancel_order_stats['min']),
-                self._format_stat_value(cancel_order_stats['max']),
-                self._format_stat_value(cancel_order_stats['mean']),
-                self._format_stat_value(cancel_order_stats['median']),
-                self._format_stat_value(cancel_order_stats['std_dev']),
-                self._format_stat_value(cancel_order_stats['p95']),
-                self._format_stat_value(cancel_order_stats['p99']),
-                self._format_failure_rate(failure_rate)
+                "[green]Success Only[/green]",
+                str(cancel_success_stats['count']),
+                self._format_stat_value(cancel_success_stats['min']),
+                self._format_stat_value(cancel_success_stats['max']),
+                self._format_stat_value(cancel_success_stats['mean']),
+                self._format_stat_value(cancel_success_stats['median']),
+                self._format_stat_value(cancel_success_stats['std_dev']),
+                self._format_stat_value(cancel_success_stats['p95']),
+                self._format_stat_value(cancel_success_stats['p99']),
+                self._format_failure_rate(cancel_failure_rate)
             )
+            
+            # Cancel order stats - Total Requests
+            cancel_total_stats = self._calculate_stats(exchange.latency_data.cancel_order_total)
+            table.add_row(
+                "",
+                "",
+                "[blue]All Requests[/blue]",
+                str(cancel_total_stats['count']),
+                self._format_stat_value(cancel_total_stats['min']),
+                self._format_stat_value(cancel_total_stats['max']),
+                self._format_stat_value(cancel_total_stats['mean']),
+                self._format_stat_value(cancel_total_stats['median']),
+                self._format_stat_value(cancel_total_stats['std_dev']),
+                self._format_stat_value(cancel_total_stats['p95']),
+                self._format_stat_value(cancel_total_stats['p99']),
+                "-"
+            )
+            
+            # Add separator between exchanges
+            if exchange != self.exchanges[-1]:  # Not the last exchange
+                table.add_row("", "", "", "", "", "", "", "", "", "", "", "")
         
         return table
     

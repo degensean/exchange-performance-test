@@ -55,24 +55,31 @@ class BinanceExchange(BaseExchange):
     async def test_orderbook_latency(self) -> None:
         """Test Binance futures orderbook latency via websocket"""
         self.failure_data.orderbook_total += 1
+        start_time = time.time()
         try:
             uri = f"{self.ws_url}{self.symbol.lower()}@depth5@100ms"
             
             async with websockets.connect(uri) as websocket:
-                start_time = time.time()
                 message = await asyncio.wait_for(websocket.recv(), timeout=5.0)
                 latency = time.time() - start_time
+                
+                # Always record total request latency (success + failures)
+                self.latency_data.orderbook_total.append(latency)
                 
                 data = json.loads(message)
                 self.latest_orderbook = data
                 
                 if 'b' in data and 'a' in data:
+                    # Record success-only latency
                     self.latency_data.orderbook.append(latency)
                     self.latest_price = self.get_mid_price_from_orderbook()
                 else:
                     self.failure_data.orderbook_failures += 1
                     
         except Exception:
+            latency = time.time() - start_time
+            # Record total request latency even for exceptions
+            self.latency_data.orderbook_total.append(latency)
             self.failure_data.orderbook_failures += 1
     
     async def test_order_latency(self) -> None:
@@ -84,6 +91,7 @@ class BinanceExchange(BaseExchange):
         price = self._round_to_tick_size(raw_price)
         
         self.failure_data.place_order_total += 1
+        start_time = time.time()
         try:
             timestamp = int(time.time() * 1000)
             params = {
@@ -106,7 +114,6 @@ class BinanceExchange(BaseExchange):
             }
             
             async with aiohttp.ClientSession() as session:
-                start_time = time.time()
                 async with session.post(
                     f"{self.base_url_pm}/papi/v1/um/order",
                     headers=headers,
@@ -114,8 +121,12 @@ class BinanceExchange(BaseExchange):
                 ) as response:
                     place_latency = time.time() - start_time
                     
+                    # Always record total request latency
+                    self.latency_data.place_order_total.append(place_latency)
+                    
                     if response.status == 200:
                         order_data = await response.json()
+                        # Record success-only latency
                         self.latency_data.place_order.append(place_latency)
                         
                         order_id = order_data['orderId']
@@ -137,15 +148,19 @@ class BinanceExchange(BaseExchange):
                         cancel_signature = self._generate_signature(cancel_query)
                         cancel_params['signature'] = cancel_signature
                         
-                        start_time = time.time()
+                        cancel_start_time = time.time()
                         async with session.delete(
                             f"{self.base_url_pm}/papi/v1/um/order",
                             headers=headers,
                             data=cancel_params
                         ) as cancel_response:
-                            cancel_latency = time.time() - start_time
+                            cancel_latency = time.time() - cancel_start_time
+                            
+                            # Always record total cancel latency
+                            self.latency_data.cancel_order_total.append(cancel_latency)
                             
                             if cancel_response.status == 200:
+                                # Record success-only cancel latency
                                 self.latency_data.cancel_order.append(cancel_latency)
                                 self.open_orders = [o for o in self.open_orders if o['id'] != order_id]
                             else:
@@ -154,6 +169,9 @@ class BinanceExchange(BaseExchange):
                         self.failure_data.place_order_failures += 1
                         
         except Exception:
+            place_latency = time.time() - start_time
+            # Record total request latency even for exceptions
+            self.latency_data.place_order_total.append(place_latency)
             self.failure_data.place_order_failures += 1
     
     async def cleanup_open_orders(self):

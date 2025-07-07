@@ -7,7 +7,7 @@ class BaseExchange:
     
     def __init__(self, name: str):
         self.name = name
-        self.latency_data = LatencyData([], [], [])
+        self.latency_data = LatencyData()
         self.failure_data = FailureData()
         self.latest_orderbook = None  # Store latest orderbook data
         self.latest_price = None      # Store latest mid price from orderbook

@@ -1,5 +1,5 @@
 from typing import List
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -28,14 +28,12 @@ class FailureData:
 @dataclass
 class LatencyData:
     """Data class to store latency measurements"""
-    orderbook: List[float]
-    place_order: List[float] 
-    cancel_order: List[float]
+    # Success-only latencies (current behavior)
+    orderbook: List[float] = field(default_factory=list)
+    place_order: List[float] = field(default_factory=list)
+    cancel_order: List[float] = field(default_factory=list)
     
-    def __post_init__(self):
-        if not isinstance(self.orderbook, list):
-            self.orderbook = []
-        if not isinstance(self.place_order, list):
-            self.place_order = []
-        if not isinstance(self.cancel_order, list):
-            self.cancel_order = []
+    # Total request latencies (including failures)
+    orderbook_total: List[float] = field(default_factory=list)
+    place_order_total: List[float] = field(default_factory=list)
+    cancel_order_total: List[float] = field(default_factory=list)
