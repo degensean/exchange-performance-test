@@ -10,16 +10,23 @@ from rich.console import Console
 from .base_exchange import BaseExchange
 from .exchange_factory import ExchangeFactory
 from .config import DEFAULT_TEST_DURATION, TEST_INTERVAL_MIN, TEST_INTERVAL_MAX, REFRESH_RATE, DECIMAL_PLACES
+from .logger import setup_logging, get_logger
 
 
 class PerformanceTester:
     """Main performance testing class"""
     
     def __init__(self, duration_seconds: int | None = None):
+        # Setup logging first
+        setup_logging()
+        self.logger = get_logger("performance_tester")
+        
         self.duration_seconds = duration_seconds if duration_seconds is not None else DEFAULT_TEST_DURATION
         self.exchanges: List[BaseExchange] = []
         self.console = Console()
         self.running = True
+        
+        self.logger.info(f"Initializing performance tester with duration: {self.duration_seconds}")
         
         # Initialize exchanges
         self._initialize_exchanges()
@@ -30,6 +37,7 @@ class PerformanceTester:
     def _setup_signal_handlers(self):
         """Setup signal handlers for graceful shutdown"""
         def signal_handler(signum, frame):
+            self.logger.info(f"Received signal {signum}, initiating graceful shutdown")
             self.running = False
         
         signal.signal(signal.SIGINT, signal_handler)
@@ -38,16 +46,30 @@ class PerformanceTester:
     async def cleanup_all_orders(self):
         """Cleanup all open orders from all exchanges"""
         cleanup_tasks = []
+        total_orders = sum(len(exchange.open_orders) for exchange in self.exchanges)
+        
+        if total_orders > 0:
+            self.logger.info(f"Cleaning up {total_orders} open orders across all exchanges")
+        
         for exchange in self.exchanges:
             if exchange.open_orders:
                 cleanup_tasks.append(exchange.cleanup_open_orders())
         
         if cleanup_tasks:
-            await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+            try:
+                await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+                self.logger.info("Order cleanup completed")
+            except Exception as e:
+                self.logger.error(f"Error during order cleanup: {e}", exc_info=True)
     
     def _initialize_exchanges(self):
         """Initialize exchange instances using factory"""
         self.exchanges = ExchangeFactory.create_exchanges()
+        if self.exchanges:
+            exchange_names = [ex.name for ex in self.exchanges]
+            self.logger.info(f"Initialized {len(self.exchanges)} exchanges: {exchange_names}")
+        else:
+            self.logger.warning("No exchanges were initialized - check configuration")
     
     def _format_failure_rate(self, rate: float) -> str:
         """Format failure rate with color coding"""
@@ -233,6 +255,9 @@ class PerformanceTester:
         else:
             self.console.print(f"[green]Starting performance test for {self.duration_seconds} seconds...[/green]")
         
+        # Small delay to let the start message be seen
+        await asyncio.sleep(1)
+        
         start_time = time.time()
         
         # Test functions for each exchange
@@ -244,27 +269,54 @@ class PerformanceTester:
                 exchange.test_order_latency,  # Test order placement more frequently
             ])
         
+        self.logger.debug(f"Test functions setup: {[f'{func.__self__.name}.{func.__name__}' for func in test_functions]}")
+        
         try:
-            with Live(self.generate_stats_table(), refresh_per_second=REFRESH_RATE, console=self.console) as live:
-                while self.running:
-                    # Check if we should stop based on duration (if not unlimited)
-                    if self.duration_seconds is not None and (time.time() - start_time >= self.duration_seconds):
-                        break
+            # Use a simpler approach with manual cursor control
+            import os
+            
+            # Clear screen once at the beginning
+            if os.name == 'nt':  # Windows
+                os.system('cls')
+            else:  # Unix/Linux/Mac
+                os.system('clear')
+            
+            last_update_time = 0
+            update_interval = 1.0 / REFRESH_RATE  # Convert refresh rate to seconds
+            
+            while self.running:
+                # Check if we should stop based on duration (if not unlimited)
+                if self.duration_seconds is not None and (time.time() - start_time >= self.duration_seconds):
+                    break
+                    
+                # Randomly select a test function
+                test_func = random.choice(test_functions)
+                
+                try:
+                    self.logger.debug(f"Running test function: {test_func.__self__.name}.{test_func.__name__}")
+                    await test_func()
+                    
+                    # Only update display at specified refresh rate
+                    current_time = time.time()
+                    if current_time - last_update_time >= update_interval:
+                        # Move cursor to top-left and print table
+                        print('\033[H', end='')  # Move cursor to home position
+                        table = self.generate_stats_table()
+                        self.console.print(table, end='')
+                        print('\033[J', end='')  # Clear from cursor to end of screen
+                        last_update_time = current_time
                         
-                    # Randomly select a test function
-                    test_func = random.choice(test_functions)
-                    
-                    try:
-                        await test_func()
-                    except Exception:
-                        pass  # Silent error handling for performance testing
-                    
-                    # Update display
-                    live.update(self.generate_stats_table())
-                    
-                    # Wait before next test
-                    await asyncio.sleep(random.uniform(TEST_INTERVAL_MIN, TEST_INTERVAL_MAX))
+                except Exception as e:
+                    self.logger.error(f"Test function {test_func.__self__.name}.{test_func.__name__} failed: {e}", exc_info=True)
+                
+                # Wait before next test
+                await asyncio.sleep(random.uniform(TEST_INTERVAL_MIN, TEST_INTERVAL_MAX))
 
+            # Print completion message after clearing screen
+            if os.name == 'nt':  # Windows
+                os.system('cls')
+            else:  # Unix/Linux/Mac
+                os.system('clear')
             self.console.print("[green]Test completed![/green]")
         
         finally:

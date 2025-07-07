@@ -24,14 +24,16 @@ main_modular.py              # Entry point for modular version
 - **Robust Cleanup**: Automatic order cancellation and cleanup on exit
 - **Safe Order Placement**: Orders placed 5% below market to avoid execution
 - **Rich Display**: Live updating statistics table with color coding
+- **Comprehensive Logging**: Detailed failure reason tracking and debugging information
 
 ## 📊 **Metrics Tracked**
 
 - **Orderbook Latency**: Time to retrieve real-time orderbook data
-- **Order Placement**: Time to place limit orders
+- **Order Placement**: Time to place limit orders  
 - **Order Cancellation**: Time to cancel orders
 - **Failure Rates**: Percentage of failed requests for each operation type
 - **Advanced Statistics**: Min, Max, Mean, Median, Standard Deviation, P95, P99, Count, and Failure Rate
+- **Failure Reasons**: Detailed logging of why requests fail (timeouts, connection errors, API errors, etc.)
 
 ## 🔧 **Configuration**
 
@@ -43,10 +45,56 @@ DEFAULT_TEST_DURATION = None  # Unlimited time (None = run until stopped)
 ORDER_SIZE_BTC = 0.001         # 0.001 BTC orders
 MARKET_OFFSET = 0.95           # Place orders 5% below market
 
+# Binance Configuration
+BINANCE_CONFIG = {
+    'symbol': 'BTCUSDT',
+    'account_type': 'portfolio',  # 'spot', 'umfutures', 'portfolio'
+    # ... additional configuration
+}
+
 # Display Configuration
 REFRESH_RATE = 2               # Updates per second
 DECIMAL_PLACES = 4             # Precision for latency display
 ```
+
+### **Binance Account Types**
+
+The framework supports three Binance account types:
+
+- **`spot`**: Binance Spot trading (https://api.binance.com)
+- **`umfutures`**: Binance UM (USDT-M) Futures (https://fapi.binance.com)  
+- **`portfolio`**: Binance Portfolio Margin (https://papi.binance.com)
+
+Configure via environment variable:
+```bash
+BINANCE_ACCOUNT_TYPE=spot     # or umfutures, portfolio
+```
+
+### **Logging Configuration**
+
+The framework provides comprehensive logging with configurable levels and output options:
+
+```bash
+# Logging Configuration
+LOG_LEVEL=INFO           # DEBUG, INFO, WARNING, ERROR, CRITICAL  
+LOG_TO_FILE=true         # true/false - whether to log to file
+LOG_DIR=logs             # directory for log files
+```
+
+**Log Levels:**
+- **DEBUG**: Detailed information for debugging (request/response details, timing)
+- **INFO**: General information about application flow and status
+- **WARNING**: Warning messages for non-critical issues
+- **ERROR**: Error messages for failures with stack traces
+- **CRITICAL**: Critical errors that might cause application shutdown
+
+**Failure Reason Logging:**
+- Connection timeouts and network errors
+- API authentication failures  
+- Invalid response formats
+- Rate limiting and throttling
+- Order placement/cancellation failures
+- WebSocket connection issues
 
 ## 📈 **Advanced Statistical Metrics**
 
@@ -87,7 +135,13 @@ python main_modular.py --help
 ```bash
 # Copy environment variables
 cp env.example .env
-# Edit .env with your API credentials
+
+# Edit .env with your API credentials and account type
+# BINANCE_API_KEY=your_api_key
+# BINANCE_SECRET_KEY=your_secret_key  
+# BINANCE_ACCOUNT_TYPE=portfolio  # spot, umfutures, or portfolio
+# LOG_LEVEL=INFO                  # DEBUG for detailed logging
+
 # Run the modular version
 python main_modular.py
 ```

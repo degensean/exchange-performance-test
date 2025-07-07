@@ -15,6 +15,8 @@ Configuration:
     Set environment variables in .env file:
     - BINANCE_API_KEY, BINANCE_SECRET_KEY for Binance testing
     - HYPERLIQUID_API_WALLET_ADDRESS, HYPERLIQUID_PRIVATE_KEY for Hyperliquid testing
+    - LOG_LEVEL for logging verbosity (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+    - LOG_TO_FILE to enable file logging (true/false)
 """
 
 import asyncio
