@@ -59,6 +59,7 @@ class HyperliquidExchange(BaseExchange):
 
     async def test_orderbook_latency(self) -> None:
         """Test Hyperliquid orderbook latency"""
+        self.failure_data.orderbook_total += 1
         try:
             start_time = time.time()
             l2_data = self.info.l2_snapshot(self.asset)
@@ -68,8 +69,10 @@ class HyperliquidExchange(BaseExchange):
                 self.latest_orderbook = l2_data
                 self.latency_data.orderbook.append(latency)
                 self.latest_price = self.get_mid_price_from_orderbook()
+            else:
+                self.failure_data.orderbook_failures += 1
         except Exception:
-            pass  # Silent error handling for performance testing
+            self.failure_data.orderbook_failures += 1
     
     async def test_order_latency(self) -> None:
         """Test Hyperliquid order placement and cancellation latency"""
@@ -80,6 +83,7 @@ class HyperliquidExchange(BaseExchange):
         raw_price = self.latest_price * MARKET_OFFSET
         price = self._round_to_tick_size(raw_price, self.asset)
         
+        self.failure_data.place_order_total += 1
         try:
             # Place order
             start_time = time.time()
@@ -109,6 +113,7 @@ class HyperliquidExchange(BaseExchange):
                     })
                     
                     # Cancel order
+                    self.failure_data.cancel_order_total += 1
                     start_time = time.time()
                     cancel_result = self.exchange.cancel(self.asset, order_id)
                     cancel_latency = time.time() - start_time
@@ -116,9 +121,15 @@ class HyperliquidExchange(BaseExchange):
                     if cancel_result and cancel_result.get("status") == "ok":
                         self.latency_data.cancel_order.append(cancel_latency)
                         self.open_orders = [o for o in self.open_orders if o['id'] != order_id]
+                    else:
+                        self.failure_data.cancel_order_failures += 1
+                else:
+                    self.failure_data.place_order_failures += 1
+            else:
+                self.failure_data.place_order_failures += 1
             
         except Exception:
-            pass  # Silent error handling for performance testing
+            self.failure_data.place_order_failures += 1
     
     async def cleanup_open_orders(self):
         """Cancel all open Hyperliquid orders"""

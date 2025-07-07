@@ -48,58 +48,77 @@ class PerformanceTester:
         """Initialize exchange instances using factory"""
         self.exchanges = ExchangeFactory.create_exchanges()
     
+    def _format_failure_rate(self, rate: float) -> str:
+        """Format failure rate with color coding"""
+        if rate <= 2.0:
+            return f"[green]{rate:.1f}%[/green]"
+        elif rate <= 10.0:
+            return f"[yellow]{rate:.1f}%[/yellow]"
+        else:
+            return f"[red]{rate:.1f}%[/red]"
+    
     def generate_stats_table(self) -> Table:
         """Generate statistics table for display"""
-        table = Table(title="Exchange Performance Statistics (in seconds)")
+        table = Table(title="Exchange Performance Statistics")
         table.add_column("Exchange", justify="right", style="cyan", no_wrap=True)
         table.add_column("Action", style="magenta")
         table.add_column("Count", justify="right", style="green")
-        table.add_column("Min", justify="right", style="green")
-        table.add_column("Max", justify="right", style="green")
-        table.add_column("Average", justify="right", style="green")
+        table.add_column("Min (s)", justify="right", style="green")
+        table.add_column("Max (s)", justify="right", style="green")
+        table.add_column("Avg (s)", justify="right", style="green")
+        table.add_column("Failure Rate", justify="right")
         
         for exchange in self.exchanges:
             # Orderbook stats
             if exchange.latency_data.orderbook:
                 latencies = exchange.latency_data.orderbook
+                failure_rate = exchange.failure_data.get_orderbook_failure_rate()
                 table.add_row(
                     exchange.name,
                     "Orderbook",
                     str(len(latencies)),
                     f"{min(latencies):.{DECIMAL_PLACES}f}",
                     f"{max(latencies):.{DECIMAL_PLACES}f}",
-                    f"{sum(latencies)/len(latencies):.{DECIMAL_PLACES}f}"
+                    f"{sum(latencies)/len(latencies):.{DECIMAL_PLACES}f}",
+                    self._format_failure_rate(failure_rate)
                 )
             else:
-                table.add_row(exchange.name, "Orderbook", "0", "-", "-", "-")
+                failure_rate = exchange.failure_data.get_orderbook_failure_rate()
+                table.add_row(exchange.name, "Orderbook", "0", "-", "-", "-", self._format_failure_rate(failure_rate))
             
             # Place order stats
             if exchange.latency_data.place_order:
                 latencies = exchange.latency_data.place_order
+                failure_rate = exchange.failure_data.get_place_order_failure_rate()
                 table.add_row(
                     "",
                     "Place Order",
                     str(len(latencies)),
                     f"{min(latencies):.{DECIMAL_PLACES}f}",
                     f"{max(latencies):.{DECIMAL_PLACES}f}",
-                    f"{sum(latencies)/len(latencies):.{DECIMAL_PLACES}f}"
+                    f"{sum(latencies)/len(latencies):.{DECIMAL_PLACES}f}",
+                    self._format_failure_rate(failure_rate)
                 )
             else:
-                table.add_row("", "Place Order", "0", "-", "-", "-")
+                failure_rate = exchange.failure_data.get_place_order_failure_rate()
+                table.add_row("", "Place Order", "0", "-", "-", "-", self._format_failure_rate(failure_rate))
             
             # Cancel order stats
             if exchange.latency_data.cancel_order:
                 latencies = exchange.latency_data.cancel_order
+                failure_rate = exchange.failure_data.get_cancel_order_failure_rate()
                 table.add_row(
                     "",
                     "Cancel Order",
                     str(len(latencies)),
                     f"{min(latencies):.{DECIMAL_PLACES}f}",
                     f"{max(latencies):.{DECIMAL_PLACES}f}",
-                    f"{sum(latencies)/len(latencies):.{DECIMAL_PLACES}f}"
+                    f"{sum(latencies)/len(latencies):.{DECIMAL_PLACES}f}",
+                    self._format_failure_rate(failure_rate)
                 )
             else:
-                table.add_row("", "Cancel Order", "0", "-", "-", "-")
+                failure_rate = exchange.failure_data.get_cancel_order_failure_rate()
+                table.add_row("", "Cancel Order", "0", "-", "-", "-", self._format_failure_rate(failure_rate))
         
         return table
     

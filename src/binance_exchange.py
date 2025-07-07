@@ -54,6 +54,7 @@ class BinanceExchange(BaseExchange):
     
     async def test_orderbook_latency(self) -> None:
         """Test Binance futures orderbook latency via websocket"""
+        self.failure_data.orderbook_total += 1
         try:
             uri = f"{self.ws_url}{self.symbol.lower()}@depth5@100ms"
             
@@ -68,9 +69,11 @@ class BinanceExchange(BaseExchange):
                 if 'b' in data and 'a' in data:
                     self.latency_data.orderbook.append(latency)
                     self.latest_price = self.get_mid_price_from_orderbook()
+                else:
+                    self.failure_data.orderbook_failures += 1
                     
         except Exception:
-            pass
+            self.failure_data.orderbook_failures += 1
     
     async def test_order_latency(self) -> None:
         """Test Binance futures order placement and cancellation latency"""
@@ -80,6 +83,7 @@ class BinanceExchange(BaseExchange):
         raw_price = self.latest_price * MARKET_OFFSET  # 5% below market
         price = self._round_to_tick_size(raw_price)
         
+        self.failure_data.place_order_total += 1
         try:
             timestamp = int(time.time() * 1000)
             params = {
@@ -122,6 +126,7 @@ class BinanceExchange(BaseExchange):
                         })
                         
                         # Cancel order
+                        self.failure_data.cancel_order_total += 1
                         cancel_params = {
                             'symbol': self.symbol,
                             'orderId': order_id,
@@ -143,9 +148,13 @@ class BinanceExchange(BaseExchange):
                             if cancel_response.status == 200:
                                 self.latency_data.cancel_order.append(cancel_latency)
                                 self.open_orders = [o for o in self.open_orders if o['id'] != order_id]
+                            else:
+                                self.failure_data.cancel_order_failures += 1
+                    else:
+                        self.failure_data.place_order_failures += 1
                         
         except Exception:
-            pass
+            self.failure_data.place_order_failures += 1
     
     async def cleanup_open_orders(self):
         """Cancel all open Binance orders"""

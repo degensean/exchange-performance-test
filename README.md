@@ -30,7 +30,8 @@ main_modular.py              # Entry point for modular version
 - **Orderbook Latency**: Time to retrieve real-time orderbook data
 - **Order Placement**: Time to place limit orders
 - **Order Cancellation**: Time to cancel orders
-- **Statistics**: Min, Max, Average, and Count for each metric
+- **Failure Rates**: Percentage of failed requests for each operation type
+- **Statistics**: Min, Max, Average, Count, and Failure Rate for each metric
 
 ## 🔧 **Configuration**
 

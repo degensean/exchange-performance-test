@@ -1,5 +1,5 @@
 from typing import Optional
-from .models import LatencyData
+from .models import LatencyData, FailureData
 
 
 class BaseExchange:
@@ -8,6 +8,7 @@ class BaseExchange:
     def __init__(self, name: str):
         self.name = name
         self.latency_data = LatencyData([], [], [])
+        self.failure_data = FailureData()
         self.latest_orderbook = None  # Store latest orderbook data
         self.latest_price = None      # Store latest mid price from orderbook
         self.open_orders = []         # Track open orders for cleanup
