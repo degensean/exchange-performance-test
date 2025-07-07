@@ -31,7 +31,7 @@ main_modular.py              # Entry point for modular version
 - **Order Placement**: Time to place limit orders
 - **Order Cancellation**: Time to cancel orders
 - **Failure Rates**: Percentage of failed requests for each operation type
-- **Statistics**: Min, Max, Average, Count, and Failure Rate for each metric
+- **Advanced Statistics**: Min, Max, Mean, Median, Standard Deviation, P95, P99, Count, and Failure Rate
 
 ## 🔧 **Configuration**
 
@@ -47,6 +47,27 @@ MARKET_OFFSET = 0.95         # Place orders 5% below market
 REFRESH_RATE = 2             # Updates per second
 DECIMAL_PLACES = 4           # Precision for latency display
 ```
+
+## 📈 **Advanced Statistical Metrics**
+
+The framework provides comprehensive statistical analysis for performance assessment:
+
+### **📏 Central Tendency**
+- **Mean**: Average latency across all requests
+- **Median**: Middle value when latencies are sorted (P50)
+
+### **📊 Variability Measures**
+- **Standard Deviation**: Measures consistency of performance (lower = more consistent)
+- **Min/Max**: Best and worst case performance
+
+### **🎯 Percentile Analysis**
+- **P95 (95th Percentile)**: 95% of requests complete faster than this time
+- **P99 (99th Percentile)**: 99% of requests complete faster than this time
+
+### **🚦 Performance Interpretation**
+- **Low Std Dev + Low P99**: Excellent, consistent performance
+- **High Std Dev**: Variable performance, investigate network/load issues
+- **High P99 vs P95**: Occasional severe outliers, potential timeouts
 
 ## 🌟 **Usage**
 
