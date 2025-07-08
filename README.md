@@ -2,6 +2,8 @@
 
 A modular, extensible framework for testing latency across multiple cryptocurrency exchanges.
 
+![Performance Test Screenshot](assets/images/screenshot.png)
+
 ## 🏗️ **Modular Architecture**
 
 ```
@@ -51,7 +53,6 @@ BINANCE_CONFIG = {
     'account_type': 'portfolio',  # 'spot', 'umfutures', 'portfolio'
     # ... additional configuration
 }
-
 # Display Configuration
 REFRESH_RATE = 2               # Updates per second
 DECIMAL_PLACES = 4             # Precision for latency display
