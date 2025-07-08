@@ -252,6 +252,98 @@ class PerformanceTester:
         
         return table
     
+    def _generate_text_summary(self) -> str:
+        """Generate a text-based summary of performance statistics for logging"""
+        summary_lines = []
+        summary_lines.append("=" * 80)
+        summary_lines.append("FINAL PERFORMANCE STATISTICS SUMMARY")
+        summary_lines.append("=" * 80)
+        
+        for exchange in self.exchanges:
+            summary_lines.append(f"\n{exchange.name}:")
+            summary_lines.append("-" * 40)
+            
+            # Orderbook stats
+            orderbook_success_stats = self._calculate_stats(exchange.latency_data.orderbook)
+            orderbook_total_stats = self._calculate_stats(exchange.latency_data.orderbook_total)
+            orderbook_failure_rate = exchange.failure_data.get_orderbook_failure_rate()
+            
+            summary_lines.append(f"  Orderbook Requests:")
+            summary_lines.append(f"    Success Only: {orderbook_success_stats['count']} requests")
+            if orderbook_success_stats['count'] > 0:
+                summary_lines.append(f"      Mean: {self._format_stat_value(orderbook_success_stats['mean'])}s")
+                summary_lines.append(f"      Median: {self._format_stat_value(orderbook_success_stats['median'])}s")
+                summary_lines.append(f"      Min: {self._format_stat_value(orderbook_success_stats['min'])}s")
+                summary_lines.append(f"      Max: {self._format_stat_value(orderbook_success_stats['max'])}s")
+                summary_lines.append(f"      P95: {self._format_stat_value(orderbook_success_stats['p95'])}s")
+                summary_lines.append(f"      P99: {self._format_stat_value(orderbook_success_stats['p99'])}s")
+            summary_lines.append(f"    Total Requests: {orderbook_total_stats['count']}")
+            summary_lines.append(f"    Failure Rate: {orderbook_failure_rate:.1f}%")
+            
+            # Place order stats
+            place_success_stats = self._calculate_stats(exchange.latency_data.place_order)
+            place_total_stats = self._calculate_stats(exchange.latency_data.place_order_total)
+            place_failure_rate = exchange.failure_data.get_place_order_failure_rate()
+            
+            summary_lines.append(f"  Place Order Requests:")
+            summary_lines.append(f"    Success Only: {place_success_stats['count']} requests")
+            if place_success_stats['count'] > 0:
+                summary_lines.append(f"      Mean: {self._format_stat_value(place_success_stats['mean'])}s")
+                summary_lines.append(f"      Median: {self._format_stat_value(place_success_stats['median'])}s")
+                summary_lines.append(f"      Min: {self._format_stat_value(place_success_stats['min'])}s")
+                summary_lines.append(f"      Max: {self._format_stat_value(place_success_stats['max'])}s")
+                summary_lines.append(f"      P95: {self._format_stat_value(place_success_stats['p95'])}s")
+                summary_lines.append(f"      P99: {self._format_stat_value(place_success_stats['p99'])}s")
+            summary_lines.append(f"    Total Requests: {place_total_stats['count']}")
+            summary_lines.append(f"    Failure Rate: {place_failure_rate:.1f}%")
+            
+            # Cancel order stats
+            cancel_success_stats = self._calculate_stats(exchange.latency_data.cancel_order)
+            cancel_total_stats = self._calculate_stats(exchange.latency_data.cancel_order_total)
+            cancel_failure_rate = exchange.failure_data.get_cancel_order_failure_rate()
+            
+            summary_lines.append(f"  Cancel Order Requests:")
+            summary_lines.append(f"    Success Only: {cancel_success_stats['count']} requests")
+            if cancel_success_stats['count'] > 0:
+                summary_lines.append(f"      Mean: {self._format_stat_value(cancel_success_stats['mean'])}s")
+                summary_lines.append(f"      Median: {self._format_stat_value(cancel_success_stats['median'])}s")
+                summary_lines.append(f"      Min: {self._format_stat_value(cancel_success_stats['min'])}s")
+                summary_lines.append(f"      Max: {self._format_stat_value(cancel_success_stats['max'])}s")
+                summary_lines.append(f"      P95: {self._format_stat_value(cancel_success_stats['p95'])}s")
+                summary_lines.append(f"      P99: {self._format_stat_value(cancel_success_stats['p99'])}s")
+            summary_lines.append(f"    Total Requests: {cancel_total_stats['count']}")
+            summary_lines.append(f"    Failure Rate: {cancel_failure_rate:.1f}%")
+        
+        summary_lines.append("\n" + "=" * 80)
+        return "\n".join(summary_lines)
+    
+    def _log_to_file_only(self, message: str) -> None:
+        """Log a message only to the file handler, not to console"""
+        # Get the main logger
+        main_logger = logging.getLogger("exchange_performance")
+        
+        # Find the file handler
+        file_handler = None
+        for handler in main_logger.handlers:
+            if isinstance(handler, logging.FileHandler):
+                file_handler = handler
+                break
+        
+        # If we have a file handler, log directly to it
+        if file_handler:
+            record = logging.LogRecord(
+                name="exchange_performance.performance_tester",
+                level=logging.INFO,
+                pathname="",
+                lineno=0,
+                msg=message,
+                args=(),
+                exc_info=None
+            )
+            # Format the timestamp
+            record.created = time.time()
+            file_handler.emit(record)
+
     async def run_test(self):
         """Run the performance test"""
         if not self.exchanges:
@@ -318,6 +410,11 @@ class PerformanceTester:
 
             # When stopping - show completion message below the final table
             runtime = time.time() - start_time
+            
+            # Log final statistics summary to file only (not console)
+            self._log_to_file_only(f"Performance test completed in {runtime:.2f} seconds")
+            self._log_to_file_only(f"Final Performance Statistics Summary:\n{self._generate_text_summary()}")
+            
             print()  # Add space after final table
             self.console.print(f"[bold green]🎉 Test completed in {runtime:.2f} seconds![/bold green]")
             if self.log_file_name:
