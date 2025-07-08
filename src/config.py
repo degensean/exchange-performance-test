@@ -50,5 +50,5 @@ HYPERLIQUID_CONFIG = {
 }
 
 # Display Configuration
-REFRESH_RATE = 5  # Table refresh rate in Hz
+REFRESH_RATE = 2  # Table refresh rate in Hz (reduced for smoother updates)
 DECIMAL_PLACES = 4  # Precision for latency display

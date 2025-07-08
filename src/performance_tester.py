@@ -272,52 +272,47 @@ class PerformanceTester:
         self.logger.debug(f"Test functions setup: {[f'{func.__self__.name}.{func.__name__}' for func in test_functions]}")
         
         try:
-            # Use a simpler approach with manual cursor control
-            import os
+            # Clear the screen and setup live display with proper handling
+            self.console.clear()
             
-            # Clear screen once at the beginning
-            if os.name == 'nt':  # Windows
-                os.system('cls')
-            else:  # Unix/Linux/Mac
-                os.system('clear')
+            # Print startup info that will remain visible
+            self.console.print("[green]Exchange Performance Test - Live Statistics[/green]")
+            self.console.print()
             
-            last_update_time = 0
-            update_interval = 1.0 / REFRESH_RATE  # Convert refresh rate to seconds
-            
-            while self.running:
-                # Check if we should stop based on duration (if not unlimited)
-                if self.duration_seconds is not None and (time.time() - start_time >= self.duration_seconds):
-                    break
-                    
-                # Randomly select a test function
-                test_func = random.choice(test_functions)
-                
-                try:
-                    self.logger.debug(f"Running test function: {test_func.__self__.name}.{test_func.__name__}")
-                    await test_func()
-                    
-                    # Only update display at specified refresh rate
-                    current_time = time.time()
-                    if current_time - last_update_time >= update_interval:
-                        # Move cursor to top-left and print table
-                        print('\033[H', end='')  # Move cursor to home position
-                        table = self.generate_stats_table()
-                        self.console.print(table, end='')
-                        print('\033[J', end='')  # Clear from cursor to end of screen
-                        last_update_time = current_time
+            # Use Rich Live display with auto-refresh
+            with Live(
+                self.generate_stats_table(), 
+                console=self.console, 
+                refresh_per_second=REFRESH_RATE,
+                auto_refresh=True,
+                transient=False
+            ) as live:
+                while self.running:
+                    # Check if we should stop based on duration (if not unlimited)
+                    if self.duration_seconds is not None and (time.time() - start_time >= self.duration_seconds):
+                        break
                         
-                except Exception as e:
-                    self.logger.error(f"Test function {test_func.__self__.name}.{test_func.__name__} failed: {e}", exc_info=True)
-                
-                # Wait before next test
-                await asyncio.sleep(random.uniform(TEST_INTERVAL_MIN, TEST_INTERVAL_MAX))
+                    # Randomly select a test function
+                    test_func = random.choice(test_functions)
+                    
+                    try:
+                        self.logger.debug(f"Running test function: {test_func.__self__.name}.{test_func.__name__}")
+                        await test_func()
+                        
+                        # Update the live display with new stats
+                        live.update(self.generate_stats_table())
+                            
+                    except Exception as e:
+                        self.logger.error(f"Test function {test_func.__self__.name}.{test_func.__name__} failed: {e}", exc_info=True)
+                    
+                    # Wait before next test
+                    await asyncio.sleep(random.uniform(TEST_INTERVAL_MIN, TEST_INTERVAL_MAX))
 
-            # Print completion message after clearing screen
-            if os.name == 'nt':  # Windows
-                os.system('cls')
-            else:  # Unix/Linux/Mac
-                os.system('clear')
-            self.console.print("[green]Test completed![/green]")
+            # When stopping - show completion message below the final table
+            runtime = time.time() - start_time
+            print()  # Add space after final table
+            self.console.print("[bold green]🎉 Test completed in {runtime:.2f} seconds! Check the log file for detailed information.[/bold green]")
+            print()
         
         finally:
             # Always cleanup orders before exiting
