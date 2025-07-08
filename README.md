@@ -128,9 +128,28 @@ python main_modular.py
 # Run for specific duration
 python main_modular.py --duration 60    # 60 seconds
 
+# Force compatibility mode for remote terminals (reduces flickering)
+python main_modular.py --no-flicker
+
+# Combine options
+python main_modular.py --duration 30 --no-flicker
+
 # Show help
 python main_modular.py --help
 ```
+
+### **Remote Terminal Compatibility**
+
+If you experience flickering when running on remote Linux systems through Windows Terminal or SSH, the framework automatically detects remote environments and adjusts settings. For persistent flickering issues, use the `--no-flicker` flag:
+
+```bash
+python main_modular.py --no-flicker
+```
+
+This enables enhanced compatibility mode with:
+- Reduced refresh rate (0.5Hz instead of 2Hz)
+- Modified ANSI escape sequence handling
+- Better buffer management for remote connections
 
 ### Quick Start
 ```bash

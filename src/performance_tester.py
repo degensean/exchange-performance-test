@@ -4,6 +4,7 @@ import random
 import signal
 import statistics
 import logging
+import os
 from typing import List
 from rich.live import Live
 from rich.table import Table
@@ -17,7 +18,7 @@ from .logger import setup_logging, get_logger
 class PerformanceTester:
     """Main performance testing class"""
     
-    def __init__(self, duration_seconds: int | None = None):
+    def __init__(self, duration_seconds: int | None = None, force_compatibility_mode: bool = False):
         # Setup logging first
         setup_logging()
         self.logger = get_logger("performance_tester")
@@ -26,6 +27,10 @@ class PerformanceTester:
         self.exchanges: List[BaseExchange] = []
         self.console = Console()
         self.running = True
+        self.force_compatibility_mode = force_compatibility_mode
+        
+        # Detect terminal environment for compatibility
+        self._detect_terminal_environment()
         
         # Capture log file name from the file handler
         self.log_file_name = None
@@ -41,6 +46,38 @@ class PerformanceTester:
         
         # Setup signal handlers for graceful shutdown
         self._setup_signal_handlers()
+    
+    def _detect_terminal_environment(self):
+        """Detect terminal environment and adjust settings for compatibility"""
+        self.is_remote_terminal = False
+        self.is_ssh = False
+        self.effective_refresh_rate = REFRESH_RATE
+        
+        # Force compatibility mode if requested
+        if self.force_compatibility_mode:
+            self.is_remote_terminal = True
+            self.logger.info("Forced compatibility mode enabled")
+        
+        # Check for SSH connection
+        if 'SSH_CLIENT' in os.environ or 'SSH_TTY' in os.environ or 'SSH_CONNECTION' in os.environ:
+            self.is_ssh = True
+            self.is_remote_terminal = True
+            
+        # Check for Windows Terminal over SSH or remote connections
+        if (os.environ.get('TERM_PROGRAM') == 'vscode' or 
+            'microsoft' in os.environ.get('TERM', '').lower() or
+            os.environ.get('WT_SESSION') or
+            self.is_ssh):
+            self.is_remote_terminal = True
+            
+        # Adjust refresh rate for remote terminals to reduce flickering
+        if self.is_remote_terminal:
+            self.effective_refresh_rate = max(0.5, REFRESH_RATE * 0.5)  # Reduce by half, minimum 0.5Hz
+            if self.force_compatibility_mode:
+                self.effective_refresh_rate = 0.5  # Even slower for forced mode
+            self.logger.info(f"Remote terminal detected, reducing refresh rate to {self.effective_refresh_rate}Hz")
+        else:
+            self.effective_refresh_rate = REFRESH_RATE
     
     def _setup_signal_handlers(self):
         """Setup signal handlers for graceful shutdown"""
@@ -372,21 +409,34 @@ class PerformanceTester:
         self.logger.debug(f"Test functions setup: {[f'{func.__self__.name}.{func.__name__}' for func in test_functions]}")
         
         try:
-            # Clear the screen and setup live display with proper handling
-            self.console.clear()
+            # Don't clear screen for remote terminals to avoid flickering
+            if not self.is_remote_terminal:
+                self.console.clear()
             
             # Print startup info that will remain visible
             self.console.print("[green]Exchange Performance Test - Live Statistics[/green]")
             self.console.print()
             
-            # Use Rich Live display with auto-refresh
-            with Live(
-                self.generate_stats_table(), 
-                console=self.console, 
-                refresh_per_second=REFRESH_RATE,
-                auto_refresh=True,
-                transient=False
-            ) as live:
+            # Configure Live display based on terminal environment
+            live_config = {
+                'console': self.console,
+                'refresh_per_second': self.effective_refresh_rate,
+                'auto_refresh': True,
+                'transient': False
+            }
+            
+            # For remote terminals, use more conservative settings
+            if self.is_remote_terminal:
+                live_config.update({
+                    'transient': True,  # Use transient mode for better remote compatibility
+                    'auto_refresh': False  # Manual refresh control for better timing
+                })
+            
+            # Use Rich Live display
+            with Live(self.generate_stats_table(), **live_config) as live:
+                last_update = time.time()
+                update_interval = 1.0 / self.effective_refresh_rate
+                
                 while self.running:
                     # Check if we should stop based on duration (if not unlimited)
                     if self.duration_seconds is not None and (time.time() - start_time >= self.duration_seconds):
@@ -399,8 +449,13 @@ class PerformanceTester:
                         self.logger.debug(f"Running test function: {test_func.__self__.name}.{test_func.__name__}")
                         await test_func()
                         
-                        # Update the live display with new stats
-                        live.update(self.generate_stats_table())
+                        # Update the live display with controlled timing for remote terminals
+                        current_time = time.time()
+                        if not self.is_remote_terminal or (current_time - last_update >= update_interval):
+                            live.update(self.generate_stats_table())
+                            if self.is_remote_terminal:
+                                live.refresh()  # Manual refresh for remote terminals
+                            last_update = current_time
                             
                     except Exception as e:
                         self.logger.error(f"Test function {test_func.__self__.name}.{test_func.__name__} failed: {e}", exc_info=True)

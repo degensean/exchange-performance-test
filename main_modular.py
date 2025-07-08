@@ -37,6 +37,7 @@ def parse_arguments():
 Examples:
     python main_modular.py                 # Run unlimited time
     python main_modular.py --duration 60   # Run for 60 seconds
+    python main_modular.py --no-flicker    # Force compatibility mode for remote terminals
         """
     )
     
@@ -45,6 +46,12 @@ Examples:
         type=int,
         default=None,
         help='Test duration in seconds (default: unlimited - run until stopped with Ctrl+C)'
+    )
+    
+    parser.add_argument(
+        '--no-flicker',
+        action='store_true',
+        help='Force compatibility mode for remote terminals to reduce flickering'
     )
     
     return parser.parse_args()
@@ -56,7 +63,7 @@ async def main():
     args = parse_arguments()
     
     # Create performance tester with specified or default duration
-    tester = PerformanceTester(duration_seconds=args.duration)
+    tester = PerformanceTester(duration_seconds=args.duration, force_compatibility_mode=args.no_flicker)
     
     # Run the performance test
     await tester.run_test()
