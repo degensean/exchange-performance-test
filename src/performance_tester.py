@@ -111,7 +111,7 @@ class PerformanceTester:
         """Initialize exchange instances using factory"""
         self.exchanges = ExchangeFactory.create_exchanges()
         if self.exchanges:
-            exchange_names = [ex.name for ex in self.exchanges]
+            exchange_names = [ex.full_name for ex in self.exchanges]
             self.logger.info(f"Initialized {len(self.exchanges)} exchanges: {exchange_names}")
         else:
             self.logger.warning("No exchanges were initialized - check configuration")
@@ -178,46 +178,11 @@ class PerformanceTester:
         table.add_column("Failure Rate", justify="right")
         
         for exchange in self.exchanges:
-            # Orderbook stats - Success Only
-            orderbook_success_stats = self._calculate_stats(exchange.latency_data.orderbook)
-            orderbook_failure_rate = exchange.failure_data.get_orderbook_failure_rate()
-            table.add_row(
-                exchange.name,
-                "Orderbook",
-                "[green]Success Only[/green]",
-                str(orderbook_success_stats['count']),
-                self._format_stat_value(orderbook_success_stats['min']),
-                self._format_stat_value(orderbook_success_stats['max']),
-                self._format_stat_value(orderbook_success_stats['mean']),
-                self._format_stat_value(orderbook_success_stats['median']),
-                self._format_stat_value(orderbook_success_stats['std_dev']),
-                self._format_stat_value(orderbook_success_stats['p95']),
-                self._format_stat_value(orderbook_success_stats['p99']),
-                self._format_failure_rate(orderbook_failure_rate)
-            )
-            
-            # Orderbook stats - Total Requests
-            orderbook_total_stats = self._calculate_stats(exchange.latency_data.orderbook_total)
-            table.add_row(
-                "",
-                "",
-                "[blue]All Requests[/blue]",
-                str(orderbook_total_stats['count']),
-                self._format_stat_value(orderbook_total_stats['min']),
-                self._format_stat_value(orderbook_total_stats['max']),
-                self._format_stat_value(orderbook_total_stats['mean']),
-                self._format_stat_value(orderbook_total_stats['median']),
-                self._format_stat_value(orderbook_total_stats['std_dev']),
-                self._format_stat_value(orderbook_total_stats['p95']),
-                self._format_stat_value(orderbook_total_stats['p99']),
-                "-"
-            )
-            
             # Place order stats - Success Only
             place_success_stats = self._calculate_stats(exchange.latency_data.place_order)
             place_failure_rate = exchange.failure_data.get_place_order_failure_rate()
             table.add_row(
-                "",
+                exchange.full_name,
                 "Place Order",
                 "[green]Success Only[/green]",
                 str(place_success_stats['count']),
@@ -297,25 +262,8 @@ class PerformanceTester:
         summary_lines.append("=" * 80)
         
         for exchange in self.exchanges:
-            summary_lines.append(f"\n{exchange.name}:")
+            summary_lines.append(f"\n{exchange.full_name}:")
             summary_lines.append("-" * 40)
-            
-            # Orderbook stats
-            orderbook_success_stats = self._calculate_stats(exchange.latency_data.orderbook)
-            orderbook_total_stats = self._calculate_stats(exchange.latency_data.orderbook_total)
-            orderbook_failure_rate = exchange.failure_data.get_orderbook_failure_rate()
-            
-            summary_lines.append(f"  Orderbook Requests:")
-            summary_lines.append(f"    Success Only: {orderbook_success_stats['count']} requests")
-            if orderbook_success_stats['count'] > 0:
-                summary_lines.append(f"      Mean: {self._format_stat_value(orderbook_success_stats['mean'])}s")
-                summary_lines.append(f"      Median: {self._format_stat_value(orderbook_success_stats['median'])}s")
-                summary_lines.append(f"      Min: {self._format_stat_value(orderbook_success_stats['min'])}s")
-                summary_lines.append(f"      Max: {self._format_stat_value(orderbook_success_stats['max'])}s")
-                summary_lines.append(f"      P95: {self._format_stat_value(orderbook_success_stats['p95'])}s")
-                summary_lines.append(f"      P99: {self._format_stat_value(orderbook_success_stats['p99'])}s")
-            summary_lines.append(f"    Total Requests: {orderbook_total_stats['count']}")
-            summary_lines.append(f"    Failure Rate: {orderbook_failure_rate:.1f}%")
             
             # Place order stats
             place_success_stats = self._calculate_stats(exchange.latency_data.place_order)
@@ -401,7 +349,6 @@ class PerformanceTester:
         test_functions = []
         for exchange in self.exchanges:
             test_functions.extend([
-                exchange.test_orderbook_latency,
                 exchange.test_order_latency,
                 exchange.test_order_latency,  # Test order placement more frequently
             ])
@@ -463,6 +410,10 @@ class PerformanceTester:
                     # Wait before next test
                     await asyncio.sleep(random.uniform(TEST_INTERVAL_MIN, TEST_INTERVAL_MAX))
 
+            # Show final table permanently after Live context ends
+            final_table = self.generate_stats_table()
+            self.console.print(final_table)
+            
             # When stopping - show completion message below the final table
             runtime = time.time() - start_time
             
@@ -479,3 +430,39 @@ class PerformanceTester:
         finally:
             # Always cleanup orders before exiting
             await self.cleanup_all_orders()
+            # Close all exchange connections
+            await self.close_all_exchanges()
+
+    async def close_all_exchanges(self):
+        """Close all exchange connections"""
+        close_tasks = []
+        
+        for exchange in self.exchanges:
+            if hasattr(exchange, 'close') and callable(getattr(exchange, 'close')):
+                close_tasks.append(self._safe_close_exchange(exchange))
+        
+        if close_tasks:
+            try:
+                await asyncio.gather(*close_tasks, return_exceptions=True)
+                self.logger.info("All exchange connections closed")
+            except Exception as e:
+                self.logger.error(f"Error closing exchanges: {e}", exc_info=True)
+    
+    async def _safe_close_exchange(self, exchange):
+        """Safely close a single exchange with timeout"""
+        try:
+            # Add timeout to prevent hanging
+            await asyncio.wait_for(exchange.close(), timeout=10.0)
+            self.logger.info(f"Successfully closed {exchange.full_name}")
+        except asyncio.TimeoutError:
+            self.logger.error(f"Close timeout for {exchange.full_name}")
+            # Force stop WebSocket if it exists
+            try:
+                if hasattr(exchange, 'ws_client') and exchange.ws_client:
+                    exchange.ws_client.stop()
+                if hasattr(exchange, 'stream_client') and exchange.stream_client:
+                    exchange.stream_client.stop()
+            except Exception as e:
+                self.logger.error(f"Force close failed for {exchange.full_name}: {e}")
+        except Exception as e:
+            self.logger.error(f"Error closing {exchange.full_name}: {e}")

@@ -23,10 +23,12 @@ main_modular.py              # Entry point for modular version
 ## 🚀 **Features**
 
 - **Multi-Exchange**: Supports Binance and Hyperliquid simultaneously
+- **Dual API Support**: Tests both REST and WebSocket APIs for comprehensive latency comparison
 - **Robust Cleanup**: Automatic order cancellation and cleanup on exit
 - **Safe Order Placement**: Orders placed 5% below market to avoid execution
 - **Rich Display**: Live updating statistics table with color coding
 - **Comprehensive Logging**: Detailed failure reason tracking and debugging information
+- **Remote Terminal Compatibility**: Automatic detection and adjustment for SSH/remote connections
 
 ## 📊 **Metrics Tracked**
 
@@ -50,26 +52,24 @@ MARKET_OFFSET = 0.95           # Place orders 5% below market
 # Binance Configuration
 BINANCE_CONFIG = {
     'symbol': 'BTCUSDT',
-    'account_type': 'portfolio',  # 'spot', 'umfutures', 'portfolio'
     # ... additional configuration
 }
 # Display Configuration
 REFRESH_RATE = 2               # Updates per second
 DECIMAL_PLACES = 4             # Precision for latency display
+
+# API Mode Configuration
+ENABLE_REST_API = True         # Enable REST API testing
+ENABLE_WEBSOCKET_API = True    # Enable WebSocket API testing
+WEBSOCKET_TIMEOUT = 10.0       # WebSocket connection timeout
+WEBSOCKET_PING_INTERVAL = 20.0 # WebSocket ping interval
 ```
 
 ### **Binance Account Types**
 
-The framework supports three Binance account types:
+The framework supports Binance Spot trading:
 
 - **`spot`**: Binance Spot trading (https://api.binance.com)
-- **`umfutures`**: Binance UM (USDT-M) Futures (https://fapi.binance.com)  
-- **`portfolio`**: Binance Portfolio Margin (https://papi.binance.com)
-
-Configure via environment variable:
-```bash
-BINANCE_ACCOUNT_TYPE=spot     # or umfutures, portfolio
-```
 
 ### **Logging Configuration**
 
@@ -151,15 +151,47 @@ This enables enhanced compatibility mode with:
 - Modified ANSI escape sequence handling
 - Better buffer management for remote connections
 
+## 🔄 **REST vs WebSocket API Comparison**
+
+The framework tests both REST and WebSocket APIs to provide comprehensive latency analysis:
+
+### **REST API Characteristics**
+- ✅ **Reliable**: Each request gets a definitive response
+- ✅ **Simple**: Easy error handling and debugging
+- ✅ **Universal**: Widely supported across all operations
+- ❌ **Higher Latency**: HTTP request/response overhead
+- ❌ **Rate Limited**: Subject to stricter API rate limits
+
+### **WebSocket API Characteristics**
+- ✅ **Lower Latency**: Persistent connection, minimal overhead
+- ✅ **Real-time**: Ideal for streaming market data
+- ✅ **Efficient**: Better bandwidth utilization
+- ❌ **Complex**: Connection management and reconnection logic
+- ❌ **Limited Operations**: Not all operations support WebSocket
+
+### **API Mode Configuration**
+
+Control which APIs to test via `src/config.py`:
+
+```python
+ENABLE_REST_API = True      # Test REST APIs
+ENABLE_WEBSOCKET_API = True # Test WebSocket APIs
+```
+
+**Expected Results:**
+- **Market Data**: WebSocket typically 20-50% faster than REST
+- **Order Operations**: Mixed results depending on exchange implementation
+- **Binance**: WebSocket excellent for market data, REST for orders
+- **Hyperliquid**: WebSocket for market data, REST for order operations
+
 ### Quick Start
 ```bash
 # Copy environment variables
 cp env.example .env
 
-# Edit .env with your API credentials and account type
+# Edit .env with your API credentials
 # BINANCE_API_KEY=your_api_key
 # BINANCE_SECRET_KEY=your_secret_key  
-# BINANCE_ACCOUNT_TYPE=portfolio  # spot, umfutures, or portfolio
 # LOG_LEVEL=INFO                  # DEBUG for detailed logging
 
 # Run the modular version

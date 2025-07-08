@@ -1,29 +1,85 @@
 import time
+import json
+import asyncio
+import threading
 import eth_account
 from eth_account.signers.local import LocalAccount
 from hyperliquid.info import Info
 from hyperliquid.exchange import Exchange
 from hyperliquid.utils import constants
+from hyperliquid.utils.types import L2BookSubscription, L2BookMsg
+from typing import Optional, Any
 from .base_exchange import BaseExchange, APIMode
-from .config import HYPERLIQUID_CONFIG, ORDER_SIZE_BTC, MARKET_OFFSET
+from .config import HYPERLIQUID_CONFIG, ORDER_SIZE_BTC, MARKET_OFFSET, WEBSOCKET_TIMEOUT, WEBSOCKET_PING_INTERVAL
 
 
-class HyperliquidExchange(BaseExchange):
-    """Hyperliquid REST API implementation"""
+class HyperliquidWebSocketExchange(BaseExchange):
+    """Hyperliquid WebSocket API implementation using the official SDK"""
     
     def __init__(self, wallet_address: str, private_key: str, asset: str | None = None):
-        super().__init__("Hyperliquid", APIMode.REST)
+        super().__init__("Hyperliquid", APIMode.WEBSOCKET)
         
-        self.logger.info("Initializing Hyperliquid exchange")
+        self.logger.info("Initializing Hyperliquid WebSocket exchange")
         
         self.wallet_address = wallet_address
         self.private_key = private_key
         self.asset = asset or HYPERLIQUID_CONFIG['asset']
-        self.info = Info(constants.MAINNET_API_URL, skip_ws=True)
+        
+        # WebSocket connection state
+        self.is_connected = False
+        self.subscription_id = None
+        self.latest_orderbook_received = asyncio.Event()
+        self.orderbook_start_time = None
         
         # Create LocalAccount for signing
         self.account: LocalAccount = eth_account.Account.from_key(private_key)
+        
+        # Initialize Info API with WebSocket support
+        self.info = Info(constants.MAINNET_API_URL, skip_ws=False)
+        
+        # Keep REST exchange for order operations
         self.exchange = Exchange(self.account, constants.MAINNET_API_URL, account_address=wallet_address)
+
+    async def connect(self):
+        """Establish WebSocket connection using the SDK"""
+        try:
+            self.logger.info("Connecting to Hyperliquid WebSocket via SDK")
+            
+            # Subscribe to orderbook updates using the SDK
+            subscription = {"type": "l2Book", "coin": self.asset}
+            
+            self.subscription_id = self.info.subscribe(subscription, self._on_orderbook_update)  # type: ignore
+            self.is_connected = True
+            self.logger.info("Hyperliquid WebSocket connection established via SDK")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to connect to Hyperliquid WebSocket: {e}", exc_info=True)
+            self.is_connected = False
+
+    async def disconnect(self):
+        """Close WebSocket connection"""
+        try:
+            if self.subscription_id is not None:
+                subscription = {"type": "l2Book", "coin": self.asset}
+                self.info.unsubscribe(subscription, self.subscription_id)  # type: ignore
+                self.subscription_id = None
+                
+            self.info.disconnect_websocket()
+            self.is_connected = False
+            self.logger.info("Hyperliquid WebSocket connection closed")
+        except Exception as e:
+            self.logger.error(f"Error disconnecting from WebSocket: {e}", exc_info=True)
+
+    def _on_orderbook_update(self, msg: L2BookMsg) -> None:
+        """Callback for orderbook updates from WebSocket"""
+        try:
+            if msg["channel"] == "l2Book" and "data" in msg:
+                orderbook_data = msg["data"]
+                if orderbook_data["coin"] == self.asset:
+                    self.latest_orderbook_received.set()
+                    self.logger.debug(f"Received orderbook update for {self.asset}")
+        except Exception as e:
+            self.logger.error(f"Error processing orderbook update: {e}", exc_info=True)
 
     def _get_tick_size(self, asset: str = "BTC") -> float:
         """Get the correct tick size for Hyperliquid assets"""
@@ -37,13 +93,12 @@ class HyperliquidExchange(BaseExchange):
         return round(price / tick_size) * tick_size
 
     async def test_order_latency(self) -> None:
-        """Test Hyperliquid order placement and cancellation latency"""
-        if not self.exchange:
-            self.logger.warning("No exchange available for order test")
-            return
-            
-        # Get current price directly from info API
+        """Test order placement via REST (WebSocket mainly for market data)"""
+        # Note: Hyperliquid WebSocket is primarily for market data
+        # Order placement is still done via REST API for reliability
+        
         if not self.latest_price:
+            # Get current price directly from info API
             try:
                 self.logger.debug(f"Getting current price for {self.asset}")
                 # Get the current market price
@@ -77,7 +132,7 @@ class HyperliquidExchange(BaseExchange):
         start_time = time.time()
         
         try:
-            # Place order
+            # Place order via REST (Hyperliquid's recommended approach)
             result = self.exchange.order(
                 name=self.asset,
                 is_buy=True,
@@ -95,7 +150,7 @@ class HyperliquidExchange(BaseExchange):
                 # Record success-only latency
                 self.latency_data.place_order.append(place_latency)
                 
-                self.logger.debug(f"Order placed successfully in {place_latency:.4f}s")
+                self.logger.debug(f"Hyperliquid order placed successfully in {place_latency:.4f}s")
                 
                 # Try to cancel order immediately
                 statuses = result.get("response", {}).get("data", {}).get("statuses", [])
@@ -106,7 +161,7 @@ class HyperliquidExchange(BaseExchange):
                     self.open_orders.append({
                         'id': order_id,
                         'asset': self.asset,
-                        'exchange': 'hyperliquid'
+                        'exchange': 'hyperliquid-websocket'
                     })
                     
                     # Cancel order
@@ -117,15 +172,15 @@ class HyperliquidExchange(BaseExchange):
             else:
                 self.failure_data.place_order_failures += 1
                 error_msg = result.get("error", "Unknown error") if result else "No result returned"
-                self.logger.error(f"Order placement failed: {error_msg}")
+                self.logger.error(f"Hyperliquid order placement failed: {error_msg}")
             
         except Exception as e:
             place_latency = time.time() - start_time
             # Record total request latency even for exceptions
             self.latency_data.place_order_total.append(place_latency)
             self.failure_data.place_order_failures += 1
-            self.logger.error(f"Unexpected error during order placement: {e}", exc_info=True)
-    
+            self.logger.error(f"Unexpected error during Hyperliquid order placement: {e}", exc_info=True)
+
     async def _cancel_order(self, order_id: str) -> None:
         """Cancel a specific order and log the result"""
         self.failure_data.cancel_order_total += 1
@@ -142,39 +197,42 @@ class HyperliquidExchange(BaseExchange):
                 # Record success-only cancel latency
                 self.latency_data.cancel_order.append(cancel_latency)
                 self.open_orders = [o for o in self.open_orders if o['id'] != order_id]
-                self.logger.debug(f"Order {order_id} cancelled successfully in {cancel_latency:.4f}s")
+                self.logger.debug(f"Hyperliquid order {order_id} cancelled successfully in {cancel_latency:.4f}s")
             else:
                 self.failure_data.cancel_order_failures += 1
                 error_msg = cancel_result.get("error", "Unknown error") if cancel_result else "No result returned"
-                self.logger.error(f"Order cancellation failed for {order_id}: {error_msg}")
+                self.logger.error(f"Hyperliquid order cancellation failed for {order_id}: {error_msg}")
                 
         except Exception as e:
             cancel_latency = time.time() - cancel_start_time
             self.latency_data.cancel_order_total.append(cancel_latency)
             self.failure_data.cancel_order_failures += 1
-            self.logger.error(f"Error cancelling order {order_id}: {e}", exc_info=True)
-    
+            self.logger.error(f"Error cancelling Hyperliquid order {order_id}: {e}", exc_info=True)
+
     async def cleanup_open_orders(self):
         """Cancel all open Hyperliquid orders"""
         if not self.open_orders:
             self.logger.info("No open orders to cleanup")
+            await self.disconnect()
             return
         
-        self.logger.info(f"Cleaning up {len(self.open_orders)} open orders")
+        self.logger.info(f"Cleaning up {len(self.open_orders)} open Hyperliquid orders")
         
         for order in self.open_orders[:]:
             try:
                 result = self.exchange.cancel(order['asset'], int(order['id']))
                 if result and result.get("status") == "ok":
                     self.open_orders.remove(order)
-                    self.logger.info(f"Successfully cancelled order {order['id']} during cleanup")
+                    self.logger.info(f"Successfully cancelled Hyperliquid order {order['id']} during cleanup")
                 else:
                     error_msg = result.get("error", "Unknown error") if result else "No result returned"
-                    self.logger.warning(f"Failed to cancel order {order['id']} during cleanup: {error_msg}")
+                    self.logger.warning(f"Failed to cancel Hyperliquid order {order['id']} during cleanup: {error_msg}")
             except Exception as e:
-                self.logger.error(f"Error during cleanup of order {order['id']}: {e}", exc_info=True)
+                self.logger.error(f"Error during cleanup of Hyperliquid order {order['id']}: {e}", exc_info=True)
+        
+        await self.disconnect()
         
         if self.open_orders:
-            self.logger.warning(f"Failed to cleanup {len(self.open_orders)} orders")
+            self.logger.warning(f"Failed to cleanup {len(self.open_orders)} Hyperliquid orders")
         else:
-            self.logger.info("All orders cleaned up successfully")
+            self.logger.info("All Hyperliquid orders cleaned up successfully")

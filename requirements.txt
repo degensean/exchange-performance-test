@@ -3,3 +3,4 @@ python-dotenv
 websockets
 aiohttp
 rich
+binance-connector-python

@@ -55,7 +55,8 @@ def setup_logging(log_level: str | None = None, log_to_file: bool | None = None,
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_file = Path(log_dir) / f"exchange_performance_{timestamp}.log"
         
-        file_handler = logging.FileHandler(log_file)
+        # Use UTF-8 encoding to handle international characters
+        file_handler = logging.FileHandler(log_file, encoding='utf-8')
         file_handler.setLevel(getattr(logging, log_level.upper()))
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)

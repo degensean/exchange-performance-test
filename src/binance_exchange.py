@@ -1,50 +1,41 @@
 import time
 import json
 import asyncio
-import aiohttp
-import websockets
-import hmac
-import hashlib
-import urllib.parse
-from .base_exchange import BaseExchange
+from binance.spot import Spot
+from binance.websocket.spot.websocket_stream import SpotWebsocketStreamClient
+from binance.error import ClientError, ServerError
+from websocket import WebSocketTimeoutException
+from .base_exchange import BaseExchange, APIMode
 from .config import BINANCE_CONFIG, ORDER_SIZE_BTC, MARKET_OFFSET
 
 
 class BinanceExchange(BaseExchange):
-    """Binance exchange implementation supporting spot, UM futures, and portfolio margin"""
+    """Binance REST API implementation using official binance-connector for spot trading"""
     
-    def __init__(self, api_key: str, api_secret: str, symbol: str | None = None, account_type: str | None = None):
-        self.account_type = account_type or BINANCE_CONFIG['account_type']
+    def __init__(self, api_key: str, api_secret: str, symbol: str | None = None):
+        super().__init__("Binance-Spot", APIMode.REST)
         
-        # Validate account type
-        if self.account_type not in ['spot', 'umfutures', 'portfolio']:
-            raise ValueError(f"Invalid account_type: {self.account_type}. Must be 'spot', 'umfutures', or 'portfolio'")
-        
-        # Set display name based on account type
-        display_name = f"Binance-{self.account_type.capitalize()}"
-        super().__init__(display_name)
-        
-        self.logger.info(f"Initializing Binance exchange with account type: {self.account_type}")
+        self.logger.info("Initializing Binance exchange for spot trading using official connector")
         
         self.api_key = api_key
         self.api_secret = api_secret
         self.symbol = symbol or BINANCE_CONFIG['symbol']
         
-        self.base_url = BINANCE_CONFIG['base_urls'][self.account_type]
-        self.ws_url = BINANCE_CONFIG['ws_urls'][self.account_type]
-        self.api_endpoint = BINANCE_CONFIG['api_endpoints'][self.account_type]
+        # Initialize Binance Spot client with official connector
+        self.client = Spot(
+            api_key=self.api_key,
+            api_secret=self.api_secret,
+            base_url=BINANCE_CONFIG['base_url'],
+            timeout=10  # 10 second timeout
+        )
         
-    
-    def _generate_signature(self, query_string: str) -> str:
-        """Generate HMAC SHA256 signature for Binance API"""
-        return hmac.new(
-            self.api_secret.encode('utf-8'),
-            query_string.encode('utf-8'),
-            hashlib.sha256
-        ).hexdigest()
+        # WebSocket client for orderbook streaming
+        self.ws_client = None
+        
+        self.logger.info("Binance REST client initialized successfully")
     
     def _get_tick_size(self, price: float) -> float:
-        """Get tick size for BTCUSDT on Binance Futures"""
+        """Get tick size for BTCUSDT on Binance Spot"""
         if price >= BINANCE_CONFIG['tick_threshold']:
             return BINANCE_CONFIG['tick_size_high']
         else:
@@ -56,46 +47,27 @@ class BinanceExchange(BaseExchange):
         return round(price / tick_size) * tick_size
     
     def _format_quantity(self, quantity: float) -> str:
-        """Format quantity with correct precision for the account type"""
-        precision = BINANCE_CONFIG['quantity_precision'][self.account_type]
+        """Format quantity with correct precision for spot trading"""
+        precision = BINANCE_CONFIG['quantity_precision']
         
-        # Format with exact precision first
+        # Start with precise formatting
         formatted = f"{quantity:.{precision}f}"
         
-        # For quantities, we need to be more careful about trailing zeros
-        # Only remove trailing zeros if we maintain at least 3 decimal places for non-spot
-        if self.account_type in ['umfutures', 'portfolio']:
-            # For futures/portfolio, maintain at least 3 decimal places
-            if '.' in formatted:
-                parts = formatted.split('.')
-                decimal_part = parts[1].rstrip('0')
-                if len(decimal_part) < 3:
-                    # Pad back to 3 decimal places minimum
-                    decimal_part = decimal_part.ljust(3, '0')
-                formatted = f"{parts[0]}.{decimal_part}"
-        else:
-            # For spot, we can be more flexible but still maintain precision
-            formatted = formatted.rstrip('0').rstrip('.')
+        # For spot trading, we can be flexible with trailing zeros
+        formatted = formatted.rstrip('0').rstrip('.')
         
         # Final safety check
         if not formatted or formatted == '0' or float(formatted) <= 0:
             min_quantity = 10 ** (-precision)
             formatted = f"{min_quantity:.{precision}f}"
-            if self.account_type in ['umfutures', 'portfolio']:
-                # Ensure minimum 3 decimals for futures/portfolio
-                if '.' in formatted:
-                    parts = formatted.split('.')
-                    if len(parts[1]) < 3:
-                        parts[1] = parts[1].ljust(3, '0')
-                    formatted = f"{parts[0]}.{parts[1]}"
             self.logger.warning(f"Quantity {quantity} too small, using minimum: {formatted}")
         
         self.logger.debug(f"Formatted quantity {quantity} to {formatted} with precision {precision}")
         return formatted
     
     def _format_price(self, price: float) -> str:
-        """Format price with correct precision for the account type"""
-        precision = BINANCE_CONFIG['price_precision'][self.account_type]
+        """Format price with correct precision for spot trading"""
+        precision = BINANCE_CONFIG['price_precision']
         formatted = f"{price:.{precision}f}"
         
         # Remove trailing zeros after decimal point but keep at least the required precision
@@ -109,105 +81,20 @@ class BinanceExchange(BaseExchange):
         self.logger.debug(f"Formatted price {price} to {formatted} with precision {precision}")
         return formatted
     
-    def _extract_bids_asks(self, orderbook_data):
-        """Extract bids and asks from Binance orderbook data"""
-        try:
-            if 'b' in orderbook_data and 'a' in orderbook_data:
-                return orderbook_data['b'], orderbook_data['a']
-            elif 'bids' in orderbook_data and 'asks' in orderbook_data:
-                return orderbook_data['bids'], orderbook_data['asks']
-        except Exception:
-            pass
-        return None, None
-    
-    async def test_orderbook_latency(self) -> None:
-        """Test Binance futures orderbook latency via websocket"""
-        self.failure_data.orderbook_total += 1
-        start_time = time.time()
-        
-        try:
-            uri = f"{self.ws_url}{self.symbol.lower()}@depth5@100ms"
-            self.logger.debug(f"Connecting to WebSocket: {uri}")
-            
-            async with websockets.connect(uri) as websocket:
-                message = await asyncio.wait_for(websocket.recv(), timeout=5.0)
-                latency = time.time() - start_time
-                
-                # Always record total request latency (success + failures)
-                self.latency_data.orderbook_total.append(latency)
-                
-                data = json.loads(message)
-                self.latest_orderbook = data
-                
-                if 'b' in data and 'a' in data:
-                    # Record success-only latency
-                    self.latency_data.orderbook.append(latency)
-                    self.latest_price = self.get_mid_price_from_orderbook()
-                    self.logger.debug(f"Orderbook retrieved successfully in {latency:.4f}s")
-                else:
-                    self.failure_data.orderbook_failures += 1
-                    self.logger.warning(f"Invalid orderbook data structure: missing 'b' or 'a' fields")
-                    
-        except asyncio.TimeoutError:
-            latency = time.time() - start_time
-            self.latency_data.orderbook_total.append(latency)
-            self.failure_data.orderbook_failures += 1
-            self.logger.error(f"Orderbook request timeout after {latency:.4f}s")
-        except websockets.exceptions.ConnectionClosed as e:
-            latency = time.time() - start_time
-            self.latency_data.orderbook_total.append(latency)
-            self.failure_data.orderbook_failures += 1
-            self.logger.error(f"WebSocket connection closed unexpectedly: {e}")
-        except json.JSONDecodeError as e:
-            latency = time.time() - start_time
-            self.latency_data.orderbook_total.append(latency)
-            self.failure_data.orderbook_failures += 1
-            self.logger.error(f"Failed to parse JSON response: {e}")
-        except Exception as e:
-            latency = time.time() - start_time
-            self.latency_data.orderbook_total.append(latency)
-            self.failure_data.orderbook_failures += 1
-            self.logger.error(f"Unexpected error in orderbook request: {e}", exc_info=True)
-    
-    def _get_order_params(self, price: float) -> dict:
-        """Get order parameters based on account type"""
-        formatted_quantity = self._format_quantity(ORDER_SIZE_BTC)
-        formatted_price = self._format_price(price)
-        
-        base_params = {
-            'symbol': self.symbol,
-            'side': 'BUY',
-            'type': 'LIMIT',
-            'quantity': formatted_quantity,
-            'price': formatted_price,
-            'timestamp': int(time.time() * 1000)
-        }
-        
-        if self.account_type == 'spot':
-            base_params['timeInForce'] = 'GTC'
-        elif self.account_type in ['umfutures', 'portfolio']:
-            base_params['timeInForce'] = 'GTC'
-            
-        return base_params
-    
-    def _get_cancel_params(self, order_id: str) -> dict:
-        """Get cancel parameters based on account type"""
-        return {
-            'symbol': self.symbol,
-            'orderId': order_id,
-            'timestamp': int(time.time() * 1000)
-        }
-    
     async def test_order_latency(self) -> None:
-        """Test Binance order placement and cancellation latency"""
-        # If we don't have latest price, fetch orderbook first
+        """Test Binance order placement and cancellation latency using official connector"""
+        # Get current market price from ticker
         if not self.latest_price:
-            self.logger.debug("No latest price available, fetching orderbook first")
-            await self.test_orderbook_latency()
-            
-            # Check if we got a price after fetching orderbook
-            if not self.latest_price:
-                self.logger.warning("Still no latest price available after fetching orderbook")
+            try:
+                ticker = self.client.ticker_price(symbol=self.symbol)
+                if ticker and 'price' in ticker:
+                    self.latest_price = float(ticker['price'])
+                    self.logger.debug(f"Got current price from ticker: {self.latest_price}")
+                else:
+                    self.logger.error("Failed to get current price from ticker")
+                    return
+            except Exception as e:
+                self.logger.error(f"Error getting current price: {e}")
                 return
         
         raw_price = self.latest_price * MARKET_OFFSET  # 5% below market
@@ -219,110 +106,133 @@ class BinanceExchange(BaseExchange):
         start_time = time.time()
         
         try:
-            params = self._get_order_params(price)
+            # Format order parameters
+            quantity = self._format_quantity(ORDER_SIZE_BTC)
+            formatted_price = self._format_price(price)
             
-            # Log detailed order parameters for debugging precision issues
-            self.logger.debug(f"Order parameters: symbol={params['symbol']}, "
-                             f"quantity={params['quantity']} (type: {type(params['quantity'])}), "
-                             f"price={params['price']} (type: {type(params['price'])}), "
-                             f"side={params['side']}, type={params['type']}")
+            self.logger.debug(f"Order parameters: symbol={self.symbol}, "
+                             f"quantity={quantity}, price={formatted_price}, "
+                             f"side=BUY, type=LIMIT")
             
-            query_string = urllib.parse.urlencode(params)
-            signature = self._generate_signature(query_string)
-            params['signature'] = signature
+            # Place order using official connector
+            order_response = self.client.new_order(
+                symbol=self.symbol,
+                side="BUY",
+                type="LIMIT",
+                quantity=quantity,
+                price=formatted_price,
+                timeInForce="GTC"
+            )
             
-            headers = {
-                'X-MBX-APIKEY': self.api_key,
-                'Content-Type': 'application/x-www-form-urlencoded'
-            }
+            place_latency = time.time() - start_time
             
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self.base_url}{self.api_endpoint}",
-                    headers=headers,
-                    data=params
-                ) as response:
-                    place_latency = time.time() - start_time
-                    
-                    # Always record total request latency
-                    self.latency_data.place_order_total.append(place_latency)
-                    
-                    if response.status == 200:
-                        order_data = await response.json()
-                        # Record success-only latency
-                        self.latency_data.place_order.append(place_latency)
+            # Always record total request latency
+            self.latency_data.place_order_total.append(place_latency)
+            
+            if order_response and 'orderId' in order_response:
+                # Record success-only latency
+                self.latency_data.place_order.append(place_latency)
+                
+                order_id = str(order_response['orderId'])
+                self.logger.debug(f"Order placed successfully in {place_latency:.4f}s, ID: {order_id}")
+                
+                self.open_orders.append({
+                    'id': order_id,
+                    'symbol': self.symbol,
+                    'exchange': 'binance'
+                })
+                
+                # Cancel order immediately
+                await self._cancel_order(order_id)
+            else:
+                self.failure_data.place_order_failures += 1
+                self.logger.error(f"Order placement failed: Invalid response {order_response}")
                         
-                        order_id = order_data['orderId']
-                        self.logger.debug(f"Order placed successfully in {place_latency:.4f}s, ID: {order_id}")
-                        
-                        self.open_orders.append({
-                            'id': order_id,
-                            'symbol': self.symbol,
-                            'exchange': 'binance'
-                        })
-                        
-                        # Cancel order
-                        await self._cancel_order(session, headers, order_id)
-                    else:
-                        self.failure_data.place_order_failures += 1
-                        error_text = await response.text()
-                        
-                        # Special handling for precision errors
-                        if '"code":-1111' in error_text:
-                            self.logger.error(f"PRECISION ERROR - Order placement failed with status {response.status}: {error_text}")
-                            self.logger.error(f"PRECISION ERROR - Order parameters that caused error: "
-                                            f"quantity='{params['quantity']}', price='{params['price']}', "
-                                            f"symbol={params['symbol']}, account_type={self.account_type}")
-                        else:
-                            self.logger.error(f"Order placement failed with status {response.status}: {error_text}")
-                        
-        except aiohttp.ClientError as e:
+        except (ClientError, ServerError) as e:
             place_latency = time.time() - start_time
             self.latency_data.place_order_total.append(place_latency)
             self.failure_data.place_order_failures += 1
-            self.logger.error(f"HTTP client error during order placement: {e}")
-        except asyncio.TimeoutError:
+            
+            # Handle specific Binance API errors
+            error_msg = str(e)
+            
+            # Extract error code from the error message if present
+            if "-1111" in error_msg or "precision" in error_msg.lower():
+                self.logger.error(f"PRECISION ERROR - Order placement failed: {error_msg}")
+                self.logger.error(f"PRECISION ERROR - Order parameters: "
+                               f"quantity={quantity}, price={formatted_price}, symbol={self.symbol}")
+            elif "-2010" in error_msg or "insufficient" in error_msg.lower():
+                self.logger.error(f"INSUFFICIENT FUNDS - Order placement failed: {error_msg}")
+            elif "-1013" in error_msg or "filter" in error_msg.lower():
+                self.logger.error(f"FILTER FAILURE - Order placement failed: {error_msg}")
+            else:
+                self.logger.error(f"BINANCE API ERROR - Order placement failed: {error_msg}")
+        
+        except (TimeoutError, WebSocketTimeoutException) as e:
             place_latency = time.time() - start_time
             self.latency_data.place_order_total.append(place_latency)
             self.failure_data.place_order_failures += 1
-            self.logger.error(f"Order placement timeout after {place_latency:.4f}s")
+            self.logger.error(f"TIMEOUT ERROR - Order placement failed: {e}")
+            
         except Exception as e:
             place_latency = time.time() - start_time
             self.latency_data.place_order_total.append(place_latency)
             self.failure_data.place_order_failures += 1
-            self.logger.error(f"Unexpected error during order placement: {e}", exc_info=True)
+            
+            # Handle other errors
+            error_msg = str(e)
+            if "precision" in error_msg.lower():
+                self.logger.error(f"PRECISION ERROR - Order placement failed: {e}")
+                self.logger.error(f"PRECISION ERROR - Order parameters: "
+                               f"quantity={quantity}, price={formatted_price}, symbol={self.symbol}")
+            else:
+                self.logger.error(f"Order placement error: {e}", exc_info=True)
     
-    async def _cancel_order(self, session: aiohttp.ClientSession, headers: dict, order_id: str) -> None:
-        """Cancel a specific order and log the result"""
+    async def _cancel_order(self, order_id: str) -> None:
+        """Cancel a specific order using official connector"""
         self.failure_data.cancel_order_total += 1
-        cancel_params = self._get_cancel_params(order_id)
-        
-        cancel_query = urllib.parse.urlencode(cancel_params)
-        cancel_signature = self._generate_signature(cancel_query)
-        cancel_params['signature'] = cancel_signature
-        
         cancel_start_time = time.time()
         
         try:
-            async with session.delete(
-                f"{self.base_url}{self.api_endpoint}",
-                headers=headers,
-                data=cancel_params
-            ) as cancel_response:
-                cancel_latency = time.time() - cancel_start_time
+            # Cancel order using official connector
+            cancel_response = self.client.cancel_order(
+                symbol=self.symbol,
+                orderId=int(order_id)
+            )
+            
+            cancel_latency = time.time() - cancel_start_time
+            
+            # Always record total cancel latency
+            self.latency_data.cancel_order_total.append(cancel_latency)
+            
+            if cancel_response and 'orderId' in cancel_response:
+                # Record success-only cancel latency
+                self.latency_data.cancel_order.append(cancel_latency)
+                self.open_orders = [o for o in self.open_orders if o['id'] != order_id]
+                self.logger.debug(f"Order {order_id} cancelled successfully in {cancel_latency:.4f}s")
+            else:
+                self.failure_data.cancel_order_failures += 1
+                self.logger.error(f"Order cancellation failed for {order_id}: Invalid response {cancel_response}")
                 
-                # Always record total cancel latency
-                self.latency_data.cancel_order_total.append(cancel_latency)
+        except (ClientError, ServerError) as e:
+            cancel_latency = time.time() - cancel_start_time
+            self.latency_data.cancel_order_total.append(cancel_latency)
+            self.failure_data.cancel_order_failures += 1
+            
+            error_msg = str(e)
+            if "-2011" in error_msg:  # Order not found
+                self.logger.warning(f"Order {order_id} not found during cancellation: {error_msg}")
+                # Remove from open orders list since it doesn't exist
+                self.open_orders = [o for o in self.open_orders if o['id'] != order_id]
+            else:
+                self.logger.error(f"Binance API error cancelling order {order_id}: {error_msg}")
                 
-                if cancel_response.status == 200:
-                    # Record success-only cancel latency
-                    self.latency_data.cancel_order.append(cancel_latency)
-                    self.open_orders = [o for o in self.open_orders if o['id'] != order_id]
-                    self.logger.debug(f"Order {order_id} cancelled successfully in {cancel_latency:.4f}s")
-                else:
-                    self.failure_data.cancel_order_failures += 1
-                    error_text = await cancel_response.text()
-                    self.logger.error(f"Order cancellation failed for {order_id} with status {cancel_response.status}: {error_text}")
+        except (TimeoutError, WebSocketTimeoutException) as e:
+            cancel_latency = time.time() - cancel_start_time
+            self.latency_data.cancel_order_total.append(cancel_latency)
+            self.failure_data.cancel_order_failures += 1
+            self.logger.error(f"TIMEOUT ERROR - Order cancellation failed for {order_id}: {e}")
+            
         except Exception as e:
             cancel_latency = time.time() - cancel_start_time
             self.latency_data.cancel_order_total.append(cancel_latency)
@@ -330,43 +240,84 @@ class BinanceExchange(BaseExchange):
             self.logger.error(f"Error cancelling order {order_id}: {e}", exc_info=True)
     
     async def cleanup_open_orders(self):
-        """Cancel all open Binance orders"""
+        """Cancel all open Binance orders using official connector"""
         if not self.open_orders:
             self.logger.info("No open orders to cleanup")
             return
         
         self.logger.info(f"Cleaning up {len(self.open_orders)} open orders")
         
-        headers = {
-            'X-MBX-APIKEY': self.api_key,
-            'Content-Type': 'application/x-www-form-urlencoded'
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            for order in self.open_orders[:]:
-                try:
-                    cancel_params = self._get_cancel_params(order['id'])
+        for order in self.open_orders[:]:
+            try:
+                cancel_response = self.client.cancel_order(
+                    symbol=self.symbol,
+                    orderId=int(order['id'])
+                )
+                
+                if cancel_response and 'orderId' in cancel_response:
+                    self.open_orders.remove(order)
+                    self.logger.info(f"Successfully cancelled order {order['id']} during cleanup")
+                else:
+                    self.logger.warning(f"Failed to cancel order {order['id']} during cleanup: Invalid response")
                     
-                    cancel_query = urllib.parse.urlencode(cancel_params)
-                    cancel_signature = self._generate_signature(cancel_query)
-                    cancel_params['signature'] = cancel_signature
-                    
-                    async with session.delete(
-                        f"{self.base_url}{self.api_endpoint}",
-                        headers=headers,
-                        data=cancel_params
-                    ) as cancel_response:
-                        if cancel_response.status == 200:
-                            self.open_orders.remove(order)
-                            self.logger.info(f"Successfully cancelled order {order['id']} during cleanup")
-                        else:
-                            error_text = await cancel_response.text()
-                            self.logger.warning(f"Failed to cancel order {order['id']} during cleanup: {error_text}")
-                            
-                except Exception as e:
-                    self.logger.error(f"Error during cleanup of order {order['id']}: {e}", exc_info=True)
+            except (ClientError, ServerError) as e:
+                error_msg = str(e)
+                if "-2011" in error_msg:  # Order not found
+                    self.logger.info(f"Order {order['id']} already cancelled or filled during cleanup")
+                    self.open_orders.remove(order)
+                else:
+                    self.logger.error(f"Binance API error during cleanup of order {order['id']}: {error_msg}")
+            except Exception as e:
+                self.logger.error(f"Error during cleanup of order {order['id']}: {e}", exc_info=True)
         
         if self.open_orders:
             self.logger.warning(f"Failed to cleanup {len(self.open_orders)} orders")
         else:
             self.logger.info("All orders cleaned up successfully")
+    
+    def __del__(self):
+        """Destructor to ensure cleanup when object is garbage collected"""
+        try:
+            if hasattr(self, 'open_orders') and self.open_orders:
+                self.logger.warning(f"BinanceExchange destructor: {len(self.open_orders)} orders still open, attempting cleanup")
+                
+                # Emergency synchronous cleanup
+                for order in self.open_orders[:]:
+                    try:
+                        cancel_response = self.client.cancel_order(
+                            symbol=self.symbol,
+                            orderId=int(order['id'])
+                        )
+                        
+                        if cancel_response and 'orderId' in cancel_response:
+                            self.open_orders.remove(order)
+                            self.logger.warning(f"Destructor cancelled order {order['id']}")
+                        
+                    except Exception as e:
+                        error_msg = str(e)
+                        if "-2011" in error_msg:  # Order not found
+                            self.open_orders.remove(order)
+                        else:
+                            self.logger.error(f"Destructor cleanup failed for order {order['id']}: {e}")
+        except Exception as e:
+            # Avoid exceptions in destructor
+            pass
+
+    async def close(self):
+        """Close connection and cleanup resources"""
+        try:
+            # Cleanup open orders first
+            await self.cleanup_open_orders()
+            
+            # Close WebSocket if exists
+            if hasattr(self, 'ws_client') and self.ws_client:
+                try:
+                    self.ws_client.stop()
+                    self.logger.info("WebSocket connection closed")
+                except Exception as e:
+                    self.logger.warning(f"Error closing WebSocket: {e}")
+            
+            self.logger.info(f"{self.full_name} closed successfully")
+            
+        except Exception as e:
+            self.logger.error(f"Error during close: {e}")
