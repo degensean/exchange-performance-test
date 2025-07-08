@@ -3,6 +3,7 @@ import time
 import random
 import signal
 import statistics
+import logging
 from typing import List
 from rich.live import Live
 from rich.table import Table
@@ -25,6 +26,13 @@ class PerformanceTester:
         self.exchanges: List[BaseExchange] = []
         self.console = Console()
         self.running = True
+        
+        # Capture log file name from the file handler
+        self.log_file_name = None
+        for handler in logging.getLogger("exchange_performance").handlers:
+            if isinstance(handler, logging.FileHandler):
+                self.log_file_name = handler.baseFilename
+                break
         
         self.logger.info(f"Initializing performance tester with duration: {self.duration_seconds}")
         
@@ -311,7 +319,9 @@ class PerformanceTester:
             # When stopping - show completion message below the final table
             runtime = time.time() - start_time
             print()  # Add space after final table
-            self.console.print("[bold green]🎉 Test completed in {runtime:.2f} seconds! Check the log file for detailed information.[/bold green]")
+            self.console.print(f"[bold green]🎉 Test completed in {runtime:.2f} seconds![/bold green]")
+            if self.log_file_name:
+                self.console.print(f"[bold blue]📄 Detailed logs saved to: {self.log_file_name}[/bold blue]")
             print()
         
         finally:
