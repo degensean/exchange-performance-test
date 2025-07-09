@@ -70,4 +70,19 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nShutdown requested by user...")
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        # Ensure all tasks are cancelled on exit
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+        except:
+            pass

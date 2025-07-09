@@ -64,11 +64,16 @@ class HyperliquidWebSocketExchange(BaseExchange):
                 self.info.unsubscribe(subscription, self.subscription_id)  # type: ignore
                 self.subscription_id = None
                 
-            self.info.disconnect_websocket()
+            # Force disconnect WebSocket with timeout
+            await asyncio.wait_for(asyncio.to_thread(self.info.disconnect_websocket), timeout=5.0)
             self.is_connected = False
             self.logger.info("Hyperliquid WebSocket connection closed")
+        except asyncio.TimeoutError:
+            self.logger.warning("Timeout disconnecting from Hyperliquid WebSocket - forcing close")
+            self.is_connected = False
         except Exception as e:
             self.logger.error(f"Error disconnecting from WebSocket: {e}", exc_info=True)
+            self.is_connected = False
 
     def _on_orderbook_update(self, msg: L2BookMsg) -> None:
         """Callback for orderbook updates from WebSocket"""
@@ -236,3 +241,26 @@ class HyperliquidWebSocketExchange(BaseExchange):
             self.logger.warning(f"Failed to cleanup {len(self.open_orders)} Hyperliquid orders")
         else:
             self.logger.info("All Hyperliquid orders cleaned up successfully")
+
+    async def close(self):
+        """Close connection and cleanup resources"""
+        try:
+            # Cleanup open orders first with timeout
+            await asyncio.wait_for(self.cleanup_open_orders(), timeout=15.0)
+            
+            self.logger.info(f"{self.full_name} closed successfully")
+            
+        except asyncio.TimeoutError:
+            self.logger.error(f"Timeout during {self.full_name} close operation")
+            # Force disconnect
+            try:
+                await asyncio.wait_for(self.disconnect(), timeout=5.0)
+            except:
+                pass
+        except Exception as e:
+            self.logger.error(f"Error during close: {e}")
+            # Still try to disconnect
+            try:
+                await asyncio.wait_for(self.disconnect(), timeout=5.0)
+            except:
+                pass

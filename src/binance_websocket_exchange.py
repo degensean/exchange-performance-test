@@ -682,6 +682,17 @@ class BinanceWebSocketExchange(BaseExchange):
             # Cleanup open orders first
             await self.cleanup_open_orders()
             
+            # Cancel background tasks first
+            if hasattr(self, 'connection_health_task') and self.connection_health_task and not self.connection_health_task.done():
+                self.connection_health_task.cancel()
+                try:
+                    await self.connection_health_task
+                    self.logger.info("Connection health monitoring task cancelled")
+                except asyncio.CancelledError:
+                    self.logger.debug("Connection health monitoring task was cancelled")
+                except Exception as e:
+                    self.logger.warning(f"Error cancelling health monitoring task: {e}")
+            
             # Close WebSocket connections
             if hasattr(self, 'ws_client') and self.ws_client:
                 try:
