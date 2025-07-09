@@ -34,7 +34,9 @@ DECIMAL_PLACES = 4  # Precision for latency display
 
 # API Mode Configuration
 ENABLE_REST_API = True      # Enable REST API testing
-ENABLE_WEBSOCKET_API = True # Enable WebSocket API testing
+ENABLE_WEBSOCKET_API = True # Enable WebSocket API testing (only for exchanges that support it)
+# Note: Hyperliquid only supports WebSocket for market data, not order placement
+# WebSocket order testing is only available for Binance
 WEBSOCKET_TIMEOUT = 30.0    # WebSocket connection timeout in seconds (increased from 10s)
 WEBSOCKET_PING_INTERVAL = 60.0  # WebSocket ping interval in seconds (increased from 20s)
 

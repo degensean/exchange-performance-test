@@ -8,22 +8,25 @@ A modular, extensible framework for testing latency across multiple cryptocurren
 
 ```
 src/
-├── __init__.py              # Package initialization
-├── models.py                # Data models (LatencyData)
-├── config.py                # Configuration settings
-├── base_exchange.py         # Abstract exchange interface
-├── binance_exchange.py      # Binance implementation
-├── hyperliquid_exchange.py  # Hyperliquid implementation
-├── exchange_factory.py      # Exchange factory pattern
-└── performance_tester.py    # Main testing orchestrator
+├── __init__.py                       # Package initialization
+├── models.py                         # Data models (LatencyData)
+├── config.py                         # Configuration settings
+├── base_exchange.py                  # Abstract exchange interface
+├── binance_exchange.py               # Binance REST implementation
+├── binance_websocket_exchange.py     # Binance WebSocket implementation
+├── hyperliquid_exchange.py           # Hyperliquid REST implementation
+├── exchange_factory.py               # Exchange factory pattern
+└── performance_tester.py             # Main testing orchestrator
 
-main_modular.py              # Entry point for modular version
+main.py                               # Entry point
 ```
 
 ## 🚀 **Features**
 
 - **Multi-Exchange**: Supports Binance and Hyperliquid simultaneously
-- **Dual API Support**: Tests both REST and WebSocket APIs for comprehensive latency comparison
+- **Dual API Support**: Tests both REST and WebSocket APIs where supported
+  - **Binance**: Full REST + WebSocket support for both market data and order placement
+  - **Hyperliquid**: REST API support for all operations, WebSocket for market data only
 - **Robust Cleanup**: Automatic order cancellation and cleanup on exit
 - **Safe Order Placement**: Orders placed 5% below market to avoid execution
 - **Rich Display**: Live updating statistics table with color coding
@@ -123,19 +126,19 @@ The framework provides comprehensive statistical analysis for performance assess
 ### Command Line Options
 ```bash
 # Run unlimited time (default)
-python main_modular.py
+python main.py
 
 # Run for specific duration
-python main_modular.py --duration 60    # 60 seconds
+python main.py --duration 60    # 60 seconds
 
 # Force compatibility mode for remote terminals (reduces flickering)
-python main_modular.py --no-flicker
+python main.py --no-flicker
 
 # Combine options
-python main_modular.py --duration 30 --no-flicker
+python main.py --duration 30 --no-flicker
 
 # Show help
-python main_modular.py --help
+python main.py --help
 ```
 
 ### **Remote Terminal Compatibility**
@@ -143,31 +146,13 @@ python main_modular.py --help
 If you experience flickering when running on remote Linux systems through Windows Terminal or SSH, the framework automatically detects remote environments and adjusts settings. For persistent flickering issues, use the `--no-flicker` flag:
 
 ```bash
-python main_modular.py --no-flicker
+python main.py --no-flicker
 ```
 
 This enables enhanced compatibility mode with:
 - Reduced refresh rate (0.5Hz instead of 2Hz)
 - Modified ANSI escape sequence handling
 - Better buffer management for remote connections
-
-## 🔄 **REST vs WebSocket API Comparison**
-
-The framework tests both REST and WebSocket APIs to provide comprehensive latency analysis:
-
-### **REST API Characteristics**
-- ✅ **Reliable**: Each request gets a definitive response
-- ✅ **Simple**: Easy error handling and debugging
-- ✅ **Universal**: Widely supported across all operations
-- ❌ **Higher Latency**: HTTP request/response overhead
-- ❌ **Rate Limited**: Subject to stricter API rate limits
-
-### **WebSocket API Characteristics**
-- ✅ **Lower Latency**: Persistent connection, minimal overhead
-- ✅ **Real-time**: Ideal for streaming market data
-- ✅ **Efficient**: Better bandwidth utilization
-- ❌ **Complex**: Connection management and reconnection logic
-- ❌ **Limited Operations**: Not all operations support WebSocket
 
 ### **API Mode Configuration**
 
@@ -179,10 +164,12 @@ ENABLE_WEBSOCKET_API = True # Test WebSocket APIs
 ```
 
 **Expected Results:**
-- **Market Data**: WebSocket typically 20-50% faster than REST
-- **Order Operations**: Mixed results depending on exchange implementation
-- **Binance**: WebSocket excellent for market data, REST for orders
-- **Hyperliquid**: WebSocket for market data, REST for order operations
+- **Market Data**: WebSocket typically 20-50% faster than REST for both exchanges
+- **Order Operations**: 
+  - **Binance**: WebSocket and REST both supported, performance varies by operation
+  - **Hyperliquid**: REST only for order operations (WebSocket not supported for order placement)
+- **Binance**: WebSocket excellent for both market data and order operations
+- **Hyperliquid**: WebSocket for market data only, REST for all order operations
 
 ### Quick Start
 ```bash
@@ -194,8 +181,8 @@ cp env.example .env
 # BINANCE_SECRET_KEY=your_secret_key  
 # LOG_LEVEL=INFO                  # DEBUG for detailed logging
 
-# Run the modular version
-python main_modular.py
+# Run the application
+python main.py
 ```
 
 ### Adding New Exchanges

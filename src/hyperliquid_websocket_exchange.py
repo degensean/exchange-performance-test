@@ -11,7 +11,13 @@ from .config import HYPERLIQUID_CONFIG, ORDER_SIZE_BTC, MARKET_OFFSET
 
 
 class HyperliquidWebSocketExchange(BaseExchange):
-    """Hyperliquid WebSocket API implementation using the official SDK for WebSocket-style order placement"""
+    """Hyperliquid WebSocket API implementation with WebSocket market data and optimized order operations
+    
+    Since Hyperliquid doesn't support true WebSocket order placement, this implementation:
+    - Uses WebSocket for real-time market data (orderbook updates)
+    - Uses direct SDK calls for order operations (same as REST, but in async context)
+    - Provides the same interface as true WebSocket exchanges
+    """
     
     def __init__(self, wallet_address: str, private_key: str, asset: str | None = None):
         super().__init__("Hyperliquid", APIMode.WEBSOCKET)
@@ -135,9 +141,10 @@ class HyperliquidWebSocketExchange(BaseExchange):
         start_time = time.time()
         
         try:
-            # Use exchange SDK in async manner (WebSocket-style implementation)
-            result = await asyncio.to_thread(
-                self.exchange.order,
+            # Direct SDK call - same as REST but in async context
+            # Note: Since Hyperliquid doesn't support true WebSocket orders,
+            # we use the SDK directly for optimal performance
+            result = self.exchange.order(
                 name=self.asset,
                 is_buy=True,
                 sz=ORDER_SIZE_BTC,
@@ -192,9 +199,10 @@ class HyperliquidWebSocketExchange(BaseExchange):
         cancel_start_time = time.time()
         
         try:
-            # Use exchange SDK in async manner (WebSocket-style implementation)
-            cancel_result = await asyncio.to_thread(
-                self.exchange.cancel,
+            # Direct SDK call - same as REST but in async context
+            # Note: Since Hyperliquid doesn't support true WebSocket orders,
+            # we use the SDK directly for optimal performance
+            cancel_result = self.exchange.cancel(
                 self.asset,
                 int(order_id)
             )
