@@ -1,6 +1,8 @@
 import time
 import asyncio
 import socket
+import json
+import threading
 from binance.spot import Spot
 from binance.websocket.spot.websocket_api import SpotWebsocketAPIClient
 from binance.error import ClientError, ServerError
@@ -21,12 +23,18 @@ class BinanceWebSocketExchange(BaseExchange):
         self.secret_key = secret_key
         self.symbol = BINANCE_CONFIG['symbol']
         
+        # Response handling for WebSocket API
+        self.pending_requests = {}  # Track pending requests by ID
+        self.request_counter = 0    # Generate unique request IDs
+        self.request_lock = threading.Lock()  # Thread-safe request ID generation
+        
         # Initialize Binance WebSocket API client for order operations
         self.ws_client = SpotWebsocketAPIClient(
             api_key=self.api_key,
             api_secret=self.secret_key,
             stream_url="wss://ws-api.binance.com:443/ws-api/v3",
-            timeout=WEBSOCKET_TIMEOUT
+            timeout=WEBSOCKET_TIMEOUT,
+            on_message=self._handle_websocket_message
         )
         
         # Stream client for orderbook data (unused in current implementation)
@@ -46,6 +54,207 @@ class BinanceWebSocketExchange(BaseExchange):
         
         self.logger.info("Binance WebSocket API client initialized successfully")
 
+    def _handle_websocket_message(self, _, message):
+        """Handle incoming WebSocket messages from Binance API with proper response correlation"""
+        try:
+            if isinstance(message, str):
+                data = json.loads(message)
+            else:
+                data = message
+            
+            self.logger.debug(f"Received WebSocket message: {data}")
+            
+            # Handle response to our requests
+            if 'id' in data:
+                request_id = data['id']
+                if request_id in self.pending_requests:
+                    # Store the response and signal the waiting event
+                    self.pending_requests[request_id]['response'] = data
+                    self.pending_requests[request_id]['event'].set()
+                    self.logger.debug(f"Response received for request {request_id}: status={data.get('status', 'unknown')}")
+                else:
+                    self.logger.warning(f"Received response for unknown request ID: {request_id}")
+            else:
+                # Handle stream data or other messages
+                self.logger.debug(f"Received non-request message: {data}")
+                
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Failed to parse WebSocket message: {e}")
+        except Exception as e:
+            self.logger.error(f"Error handling WebSocket message: {e}")
+
+    def _generate_request_id(self) -> str:
+        """Generate a unique request ID for WebSocket requests"""
+        with self.request_lock:
+            self.request_counter += 1
+            return f"req_{int(time.time())}_{self.request_counter}"
+
+    async def _place_order_websocket(self, symbol: str, side: str, type: str, 
+                                   quantity: float, price: float, timeInForce: str = "GTC"):
+        """Place an order using Binance WebSocket API with proper response handling"""
+        try:
+            request_id = self._generate_request_id()
+            
+            # Store the request for response correlation
+            response_event = asyncio.Event()
+            self.pending_requests[request_id] = {
+                'event': response_event,
+                'response': None,
+                'timestamp': time.time()
+            }
+            
+            self.logger.debug(f"Placing WebSocket order with ID {request_id}: {symbol} {side} {quantity} @ {price}")
+            
+            # Use the binance-connector's built-in new_order method with custom ID
+            # Call directly instead of using executor to avoid threading issues
+            self.ws_client.new_order(
+                id=request_id,
+                symbol=symbol,
+                side=side,
+                type=type,
+                quantity=str(quantity),
+                price=str(price),
+                timeInForce=timeInForce
+            )
+            
+            # Wait for response with timeout (increased from 10s to 20s for better reliability)
+            try:
+                await asyncio.wait_for(response_event.wait(), timeout=20.0)
+                response = self.pending_requests[request_id]['response']
+                
+                if response and response.get('status') == 200 and 'result' in response:
+                    self.logger.debug(f"WebSocket order placement succeeded: {response['result']}")
+                    return response['result']
+                elif response and 'error' in response:
+                    error = response['error']
+                    self.logger.error(f"WebSocket order placement error: {error}")
+                    # Create a formatted error response similar to REST API
+                    raise Exception(f"({error.get('code', 'unknown')}, {error.get('msg', 'Unknown error')})")
+                else:
+                    self.logger.error(f"WebSocket order placement failed: Invalid response {response}")
+                    raise Exception("Invalid response None")
+                    
+            except asyncio.TimeoutError:
+                self.logger.error("WebSocket order placement timeout - no response received")
+                
+                # CRITICAL FIX: When WebSocket times out, the order might still be placed!
+                # Query for recent orders to find and cancel any orphaned orders
+                await self._handle_websocket_timeout_order_placement(quantity, price)
+                
+                raise Exception("WebSocket order placement timeout")
+                
+        except Exception as e:
+            self.logger.error(f"WebSocket order placement failed: {e}")
+            raise
+        finally:
+            # Clean up pending request
+            if request_id in self.pending_requests:
+                del self.pending_requests[request_id]
+
+    async def _handle_websocket_timeout_order_placement(self, quantity: float, price: float):
+        """Handle potential orphaned orders when WebSocket placement times out"""
+        try:
+            self.logger.warning("Checking for orphaned orders after WebSocket timeout...")
+            
+            # Use REST API to query recent orders
+            from binance.spot import Spot
+            rest_client = Spot(
+                api_key=self.api_key,
+                api_secret=self.secret_key,
+                timeout=5
+            )
+            
+            # Get recent orders for this symbol
+            recent_orders = rest_client.get_orders(symbol=self.symbol, limit=10)
+            
+            # Look for orders placed in the last 30 seconds with matching parameters
+            current_time = time.time() * 1000  # Convert to milliseconds
+            for order in recent_orders:
+                # Check if order was placed recently (within last 30 seconds)
+                order_time = order.get('time', 0)
+                if current_time - order_time < 30000:  # 30 seconds in milliseconds
+                    # Check if order matches our parameters
+                    order_qty = float(order.get('origQty', 0))
+                    order_price = float(order.get('price', 0))
+                    order_status = order.get('status', '')
+                    
+                    # If quantity and price match within tolerance and order is still active
+                    if (abs(order_qty - quantity) < 0.001 and 
+                        abs(order_price - price) < 0.01 and 
+                        order_status in ['NEW', 'PARTIALLY_FILLED']):
+                        
+                        order_id = str(order['orderId'])
+                        self.logger.warning(f"Found potential orphaned order {order_id} with qty={order_qty}, price={order_price}")
+                        
+                        # Add to open orders list for tracking
+                        self.open_orders.append({
+                            'id': order_id,
+                            'symbol': self.symbol,
+                            'exchange': 'binance'
+                        })
+                        
+                        # Try to cancel immediately
+                        try:
+                            await asyncio.wait_for(self._cancel_order(order_id), timeout=10.0)
+                            self.logger.info(f"Successfully cancelled orphaned order {order_id}")
+                        except Exception as cancel_error:
+                            self.logger.error(f"Failed to cancel orphaned order {order_id}: {cancel_error}")
+                            
+        except Exception as e:
+            self.logger.error(f"Error checking for orphaned orders: {e}")
+
+    async def _cancel_order_websocket(self, symbol: str, orderId: int):
+        """Cancel an order using Binance WebSocket API with proper response handling"""
+        try:
+            request_id = self._generate_request_id()
+            
+            # Store the request for response correlation
+            response_event = asyncio.Event()
+            self.pending_requests[request_id] = {
+                'event': response_event,
+                'response': None,
+                'timestamp': time.time()
+            }
+            
+            self.logger.debug(f"Cancelling WebSocket order with ID {request_id}: {orderId}")
+            
+            # Use the binance-connector's built-in cancel_order method with custom ID
+            # Call directly instead of using executor to avoid threading issues
+            self.ws_client.cancel_order(
+                id=request_id,
+                symbol=symbol,
+                orderId=orderId
+            )
+            
+            # Wait for response with timeout (increased from 10s to 15s for better reliability)
+            try:
+                await asyncio.wait_for(response_event.wait(), timeout=15.0)
+                response = self.pending_requests[request_id]['response']
+                
+                if response and response.get('status') == 200 and 'result' in response:
+                    self.logger.debug(f"WebSocket order cancellation succeeded: {response['result']}")
+                    return response['result']
+                elif response and 'error' in response:
+                    error = response['error']
+                    self.logger.error(f"WebSocket order cancellation error: {error}")
+                    # Create a formatted error response similar to REST API
+                    raise Exception(f"({error.get('code', 'unknown')}, {error.get('msg', 'Unknown error')})")
+                else:
+                    self.logger.error(f"WebSocket order cancellation failed: Invalid response {response}")
+                    raise Exception("Invalid response None")
+                    
+            except asyncio.TimeoutError:
+                self.logger.error("WebSocket order cancellation timeout - no response received")
+                raise Exception("WebSocket order cancellation timeout")
+                
+        except Exception as e:
+            self.logger.error(f"WebSocket order cancellation failed: {e}")
+            raise
+        finally:
+            # Clean up pending request
+            if request_id in self.pending_requests:
+                del self.pending_requests[request_id]
+
     async def connect(self):
         """Establish WebSocket connection with enhanced retry logic and health monitoring"""
         if self.recovery_in_progress:
@@ -62,12 +271,13 @@ class BinanceWebSocketExchange(BaseExchange):
                 # Close any existing connections first
                 await self._force_disconnect()
                 
-                # Re-initialize the WebSocket client with enhanced settings
+                # Always create a fresh WebSocket client to ensure proper message handling
                 self.ws_client = SpotWebsocketAPIClient(
                     api_key=self.api_key,
                     api_secret=self.secret_key,
                     stream_url="wss://ws-api.binance.com:443/ws-api/v3",
-                    timeout=WEBSOCKET_TIMEOUT
+                    timeout=WEBSOCKET_TIMEOUT,
+                    on_message=self._handle_websocket_message
                 )
                 
                 # Test the connection with a simple ping-like operation
@@ -389,15 +599,34 @@ class BinanceWebSocketExchange(BaseExchange):
 
     async def test_order_latency(self) -> None:
         """Test Binance order placement and cancellation latency using WebSocket API"""
+        # First, do a comprehensive cleanup using REST API to ensure clean start
+        self.logger.info("Starting comprehensive cleanup before order latency test...")
+        await self.cleanup_all_open_orders_rest()
+        
+        # Also cleanup any orders in our tracking list
+        if self.open_orders:
+            self.logger.warning(f"Found {len(self.open_orders)} leftover orders in tracking list, cleaning up")
+            await self.cleanup_open_orders()
+        
         self.logger.debug(f"Starting order latency test - Connection status: {self.is_connected}, Failures: {self.connection_failures}")
-        # Wrap the actual test in safe WebSocket operation
-        await self._safe_websocket_operation(
-            self._test_order_latency_internal,
-            "order latency test"
-        )
+        
+        try:
+            # Wrap the actual test in safe WebSocket operation
+            await self._safe_websocket_operation(
+                self._test_order_latency_internal,
+                "order latency test"
+            )
+        finally:
+            # Always cleanup any remaining orders after the test, regardless of success/failure
+            if self.open_orders:
+                self.logger.warning(f"Cleaning up {len(self.open_orders)} remaining orders after test")
+                try:
+                    await self.cleanup_open_orders()
+                except Exception as cleanup_error:
+                    self.logger.error(f"Error during post-test cleanup: {cleanup_error}")
 
     async def _test_order_latency_internal(self) -> None:
-        """Internal implementation of order latency test with enhanced error handling"""
+        """Internal implementation of order latency test using WebSocket API"""
         # Get current market price from REST API (since WebSocket order API doesn't provide ticker)
         if not self.latest_price:
             try:
@@ -422,7 +651,7 @@ class BinanceWebSocketExchange(BaseExchange):
         raw_price = self.latest_price * MARKET_OFFSET  # 5% below market
         price = self._round_to_tick_size(raw_price)
 
-        self.logger.debug(f"Placing order via WebSocket-fallback: {ORDER_SIZE_BTC} {self.symbol} at {price}")
+        self.logger.debug(f"Placing order via WebSocket: {ORDER_SIZE_BTC} {self.symbol} at {price}")
 
         self.failure_data.place_order_total += 1
         start_time = time.time()
@@ -436,21 +665,13 @@ class BinanceWebSocketExchange(BaseExchange):
                              f"quantity={quantity}, price={formatted_price}, "
                              f"side=BUY, type=LIMIT")
 
-            # Use REST API as fallback due to WebSocket API limitations
-            from binance.spot import Spot
-            rest_client = Spot(
-                api_key=self.api_key,
-                api_secret=self.secret_key,
-                timeout=15  # Increased timeout for order placement
-            )
-
-            # Place order using REST API as fallback
-            order_response = rest_client.new_order(
+            # Use WebSocket API for order placement
+            order_response = await self._place_order_websocket(
                 symbol=self.symbol,
                 side="BUY",
                 type="LIMIT",
-                quantity=quantity,
-                price=formatted_price,
+                quantity=float(quantity),
+                price=float(formatted_price),
                 timeInForce="GTC"
             )
 
@@ -464,7 +685,7 @@ class BinanceWebSocketExchange(BaseExchange):
                 self.latency_data.place_order.append(place_latency)
 
                 order_id = str(order_response['orderId'])
-                self.logger.debug(f"Order placed successfully in {place_latency:.4f}s, ID: {order_id}")
+                self.logger.debug(f"Order placed successfully via WebSocket in {place_latency:.4f}s, ID: {order_id}")
 
                 self.open_orders.append({
                     'id': order_id,
@@ -472,11 +693,17 @@ class BinanceWebSocketExchange(BaseExchange):
                     'exchange': 'binance'
                 })
 
-                # Cancel order immediately
-                await self._cancel_order(order_id)
+                # Cancel order immediately with timeout
+                try:
+                    await asyncio.wait_for(self._cancel_order(order_id), timeout=10.0)
+                except asyncio.TimeoutError:
+                    self.logger.error(f"Timeout cancelling order {order_id}, will be cleaned up later")
+                except Exception as cancel_error:
+                    self.logger.error(f"Error cancelling order {order_id}: {cancel_error}")
+                    # Order will remain in open_orders list for cleanup
             else:
                 self.failure_data.place_order_failures += 1
-                self.logger.error(f"Order placement failed: Invalid response {order_response}")
+                self.logger.error(f"WebSocket order placement failed: Invalid response {order_response}")
 
         except (TimeoutError, WebSocketTimeoutException, asyncio.TimeoutError, socket.timeout) as e:
             place_latency = time.time() - start_time
@@ -522,28 +749,20 @@ class BinanceWebSocketExchange(BaseExchange):
                 # Don't re-raise general API errors as they're not connection issues
 
     async def _cancel_order(self, order_id: str) -> None:
-        """Cancel a specific order using REST API fallback with timeout handling"""
+        """Cancel a specific order using WebSocket API with timeout handling"""
         await self._safe_websocket_operation(
             lambda: self._cancel_order_internal(order_id),
             f"cancel order {order_id}"
         )
 
     async def _cancel_order_internal(self, order_id: str) -> None:
-        """Internal implementation of order cancellation with enhanced error handling"""
+        """Internal implementation of order cancellation using WebSocket API"""
         self.failure_data.cancel_order_total += 1
         cancel_start_time = time.time()
 
         try:
-            # Use REST API for cancellation with enhanced timeout handling
-            from binance.spot import Spot
-            rest_client = Spot(
-                api_key=self.api_key,
-                api_secret=self.secret_key,
-                timeout=15  # Increased timeout for cancellation
-            )
-
-            # Cancel order using REST API
-            cancel_response = rest_client.cancel_order(
+            # Use WebSocket API for cancellation
+            cancel_response = await self._cancel_order_websocket(
                 symbol=self.symbol,
                 orderId=int(order_id)
             )
@@ -557,16 +776,16 @@ class BinanceWebSocketExchange(BaseExchange):
                 # Record success-only cancel latency
                 self.latency_data.cancel_order.append(cancel_latency)
                 self.open_orders = [o for o in self.open_orders if o['id'] != order_id]
-                self.logger.debug(f"Order {order_id} cancelled successfully in {cancel_latency:.4f}s")
+                self.logger.debug(f"Order {order_id} cancelled successfully via WebSocket in {cancel_latency:.4f}s")
             else:
                 self.failure_data.cancel_order_failures += 1
-                self.logger.error(f"Order cancellation failed for {order_id}: Invalid response {cancel_response}")
+                self.logger.error(f"WebSocket order cancellation failed for {order_id}: Invalid response {cancel_response}")
 
         except (TimeoutError, WebSocketTimeoutException, asyncio.TimeoutError, socket.timeout) as e:
             cancel_latency = time.time() - cancel_start_time
             self.latency_data.cancel_order_total.append(cancel_latency)
             self.failure_data.cancel_order_failures += 1
-            self.logger.error(f"TIMEOUT ERROR - Order cancellation failed for {order_id} after {cancel_latency:.3f}s: {type(e).__name__}: {e}")
+            self.logger.error(f"TIMEOUT ERROR - WebSocket order cancellation failed for {order_id} after {cancel_latency:.3f}s: {type(e).__name__}: {e}")
             self.connection_failures += 1
             # Re-raise to trigger recovery in _safe_websocket_operation
             raise
@@ -575,7 +794,7 @@ class BinanceWebSocketExchange(BaseExchange):
             cancel_latency = time.time() - cancel_start_time
             self.latency_data.cancel_order_total.append(cancel_latency)
             self.failure_data.cancel_order_failures += 1
-            self.logger.error(f"CONNECTION ERROR - Order cancellation failed for {order_id} after {cancel_latency:.3f}s: {type(e).__name__}: {e}")
+            self.logger.error(f"CONNECTION ERROR - WebSocket order cancellation failed for {order_id} after {cancel_latency:.3f}s: {type(e).__name__}: {e}")
             self.connection_failures += 1
             # Re-raise to trigger recovery
             raise
@@ -587,59 +806,347 @@ class BinanceWebSocketExchange(BaseExchange):
 
             error_msg = str(e)
             if "-2011" in error_msg:  # Order not found
-                self.logger.warning(f"Order {order_id} not found during cancellation (likely already filled/cancelled): {error_msg}")
+                self.logger.warning(f"Order {order_id} not found during WebSocket cancellation (likely already filled/cancelled): {error_msg}")
                 # Remove from open orders list since it doesn't exist
                 self.open_orders = [o for o in self.open_orders if o['id'] != order_id]
             elif "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
-                self.logger.error(f"API TIMEOUT - Order cancellation failed for {order_id} after {cancel_latency:.3f}s: {error_msg}")
+                self.logger.error(f"API TIMEOUT - WebSocket order cancellation failed for {order_id} after {cancel_latency:.3f}s: {error_msg}")
                 self.connection_failures += 1
                 # Re-raise timeout errors to trigger recovery
                 raise asyncio.TimeoutError(f"API timeout: {error_msg}")
             else:
-                self.logger.error(f"API ERROR - Order cancellation failed for {order_id}: {error_msg}")
+                self.logger.error(f"API ERROR - WebSocket order cancellation failed for {order_id}: {error_msg}")
                 # Don't re-raise general API errors as they're not connection issues
 
+    async def cancel_all_orders_websocket(self, symbol: str | None = None):
+        """Cancel all open orders for a symbol using WebSocket API with proper response handling"""
+        if symbol is None:
+            symbol = self.symbol
+        
+        # At this point symbol is guaranteed to be a string
+        assert isinstance(symbol, str), "Symbol must be a string"
+        
+        request_id = None    
+        try:
+            # First, get all open orders for the symbol
+            open_orders = await self._get_open_orders_websocket(symbol)
+            
+            if not open_orders:
+                self.logger.info(f"No open orders found for {symbol}")
+                return {"cancelled_orders": []}
+            
+            self.logger.info(f"Found {len(open_orders)} open orders for {symbol}, cancelling all...")
+            
+            # Cancel all orders using the bulk cancel operation
+            request_id = self._generate_request_id()
+            
+            # Store the request for response correlation
+            response_event = asyncio.Event()
+            self.pending_requests[request_id] = {
+                'event': response_event,
+                'response': None,
+                'timestamp': time.time()
+            }
+            
+            self.logger.debug(f"Cancelling all orders with ID {request_id} for symbol: {symbol}")
+            
+            # Use the binance-connector's built-in cancel_open_orders method
+            self.ws_client.cancel_open_orders(
+                id=request_id,
+                symbol=symbol
+            )
+            
+            # Wait for response with timeout
+            try:
+                await asyncio.wait_for(response_event.wait(), timeout=20.0)
+                response = self.pending_requests[request_id]['response']
+                
+                if response and response.get('status') == 200 and 'result' in response:
+                    cancelled_orders = response['result']
+                    self.logger.info(f"Successfully cancelled {len(cancelled_orders)} orders via WebSocket")
+                    return {"cancelled_orders": cancelled_orders}
+                elif response and 'error' in response:
+                    error = response['error']
+                    self.logger.error(f"WebSocket cancel all orders error: {error}")
+                    raise Exception(f"({error.get('code', 'unknown')}, {error.get('msg', 'Unknown error')})")
+                else:
+                    self.logger.error(f"WebSocket cancel all orders failed: Invalid response {response}")
+                    raise Exception("Invalid response for cancel all orders")
+                    
+            except asyncio.TimeoutError:
+                self.logger.error("WebSocket cancel all orders timeout - no response received")
+                raise Exception("WebSocket cancel all orders timeout")
+                
+        except Exception as e:
+            self.logger.error(f"WebSocket cancel all orders failed: {e}")
+            raise
+        finally:
+            # Clean up pending request
+            if request_id and request_id in self.pending_requests:
+                del self.pending_requests[request_id]
+
+    async def _get_open_orders_websocket(self, symbol: str | None = None):
+        """Get all open orders for a symbol using WebSocket API"""
+        if symbol is None:
+            symbol = self.symbol
+        
+        # At this point symbol is guaranteed to be a string
+        assert isinstance(symbol, str), "Symbol must be a string"
+        
+        request_id = None
+        try:
+            request_id = self._generate_request_id()
+            
+            # Store the request for response correlation
+            response_event = asyncio.Event()
+            self.pending_requests[request_id] = {
+                'event': response_event,
+                'response': None,
+                'timestamp': time.time()
+            }
+            
+            self.logger.debug(f"Getting open orders with ID {request_id} for symbol: {symbol}")
+            
+            # Use the binance-connector's built-in get_open_orders method
+            self.ws_client.get_open_orders(
+                id=request_id,
+                symbol=symbol
+            )
+            
+            # Wait for response with timeout
+            try:
+                await asyncio.wait_for(response_event.wait(), timeout=15.0)
+                response = self.pending_requests[request_id]['response']
+                
+                if response and response.get('status') == 200 and 'result' in response:
+                    orders = response['result']
+                    self.logger.debug(f"Retrieved {len(orders)} open orders for {symbol}")
+                    return orders
+                elif response and 'error' in response:
+                    error = response['error']
+                    self.logger.error(f"WebSocket get open orders error: {error}")
+                    raise Exception(f"({error.get('code', 'unknown')}, {error.get('msg', 'Unknown error')})")
+                else:
+                    self.logger.error(f"WebSocket get open orders failed: Invalid response {response}")
+                    raise Exception("Invalid response for get open orders")
+                    
+            except asyncio.TimeoutError:
+                self.logger.error("WebSocket get open orders timeout - no response received")
+                raise Exception("WebSocket get open orders timeout")
+                
+        except Exception as e:
+            self.logger.error(f"WebSocket get open orders failed: {e}")
+            raise
+        finally:
+            # Clean up pending request
+            if request_id and request_id in self.pending_requests:
+                del self.pending_requests[request_id]
+
+    async def place_multiple_orders_websocket(self, orders_config: list):
+        """Place multiple orders sequentially using WebSocket API"""
+        placed_orders = []
+        failed_orders = []
+        
+        self.logger.info(f"Placing {len(orders_config)} orders via WebSocket...")
+        
+        for i, order_config in enumerate(orders_config):
+            try:
+                self.logger.debug(f"Placing order {i+1}/{len(orders_config)}: {order_config}")
+                
+                result = await self._place_order_websocket(
+                    symbol=order_config.get('symbol', self.symbol),
+                    side=order_config['side'],
+                    type=order_config.get('type', 'LIMIT'),
+                    quantity=order_config['quantity'],
+                    price=order_config['price'],
+                    timeInForce=order_config.get('timeInForce', 'GTC')
+                )
+                
+                placed_orders.append({
+                    'config': order_config,
+                    'result': result,
+                    'order_id': result.get('orderId')
+                })
+                
+                self.logger.info(f"Order {i+1} placed successfully with ID: {result.get('orderId')}")
+                
+                # Small delay between orders to avoid rate limits
+                await asyncio.sleep(0.5)
+                
+            except Exception as e:
+                failed_orders.append({
+                    'config': order_config,
+                    'error': str(e)
+                })
+                self.logger.error(f"Order {i+1} failed: {e}")
+        
+        self.logger.info(f"Multiple order placement completed: {len(placed_orders)} successful, {len(failed_orders)} failed")
+        
+        return {
+            'placed_orders': placed_orders,
+            'failed_orders': failed_orders,
+            'success_count': len(placed_orders),
+            'failure_count': len(failed_orders)
+        }
+
     async def cleanup_open_orders(self):
-        """Cancel all open Binance orders using REST API fallback"""
+        """Cancel all open Binance orders using enhanced WebSocket API with REST fallback"""
         if not self.open_orders:
             self.logger.info("No open orders to cleanup")
             return
         
-        self.logger.info(f"Cleaning up {len(self.open_orders)} open orders via WebSocket-fallback")
+        self.logger.info(f"Cleaning up {len(self.open_orders)} open orders via enhanced WebSocket API")
         
-        # Use REST API for cleanup due to WebSocket API issues
-        from binance.spot import Spot
-        rest_client = Spot(
-            api_key=self.api_key,
-            api_secret=self.secret_key,
-            timeout=10
-        )
+        try:
+            # First, try the enhanced bulk cancel all orders functionality
+            result = await self.cancel_all_orders_websocket(self.symbol)
+            cancelled_orders = result.get('cancelled_orders', [])
+            
+            if cancelled_orders:
+                self.logger.info(f"Successfully cancelled {len(cancelled_orders)} orders via bulk WebSocket operation")
+                
+                # Update our tracking list - remove cancelled orders
+                cancelled_order_ids = {str(order.get('orderId', '')) for order in cancelled_orders}
+                self.open_orders = [order for order in self.open_orders if order['id'] not in cancelled_order_ids]
+                
+                # If all orders were cancelled, we're done
+                if not self.open_orders:
+                    self.logger.info("All orders cleaned up successfully via bulk operation")
+                    return
+            
+        except Exception as e:
+            self.logger.warning(f"Bulk WebSocket cancel failed: {e}, falling back to individual cancellation")
         
+        # Fallback: Try individual WebSocket cancellation for remaining orders
+        failed_orders = []
         for order in self.open_orders[:]:
             try:
-                cancel_response = rest_client.cancel_order(
-                    symbol=self.symbol,
-                    orderId=int(order['id'])
-                )
-                
-                if cancel_response and 'orderId' in cancel_response:
-                    self.open_orders.remove(order)
-                    self.logger.info(f"Successfully cancelled order {order['id']} during cleanup via WebSocket-fallback")
-                else:
-                    self.logger.warning(f"Failed to cancel order {order['id']} during cleanup via WebSocket-fallback: Invalid response")
+                # Use WebSocket API for cleanup with shorter timeout
+                await asyncio.wait_for(self._cancel_order(order['id']), timeout=5.0)
+                self.logger.info(f"Successfully cancelled order {order['id']} during cleanup via WebSocket")
                     
+            except asyncio.TimeoutError:
+                self.logger.warning(f"WebSocket timeout cancelling order {order['id']}, will retry with REST API")
+                failed_orders.append(order)
             except Exception as e:
                 error_msg = str(e)
                 if "-2011" in error_msg:  # Order not found
                     self.logger.info(f"Order {order['id']} already cancelled or filled during cleanup")
-                    self.open_orders.remove(order)
+                    self.open_orders = [o for o in self.open_orders if o['id'] != order['id']]
                 else:
-                    self.logger.error(f"WebSocket-fallback error during cleanup of order {order['id']}: {e}", exc_info=True)
+                    self.logger.warning(f"WebSocket error during cleanup of order {order['id']}: {e}")
+                    failed_orders.append(order)
+        
+        # Final fallback: Use REST API for failed orders
+        if failed_orders:
+            self.logger.warning(f"Attempting REST API fallback for {len(failed_orders)} failed orders")
+            await self._cleanup_orders_rest_fallback(failed_orders)
         
         if self.open_orders:
-            self.logger.warning(f"Failed to cleanup {len(self.open_orders)} orders via WebSocket-fallback")
+            self.logger.error(f"CRITICAL: Failed to cleanup {len(self.open_orders)} orders - manual intervention may be required!")
+            for order in self.open_orders:
+                self.logger.error(f"Uncancelled order: {order['id']} on {order['symbol']}")
         else:
-            self.logger.info("All orders cleaned up successfully via WebSocket-fallback")
+            self.logger.info("All orders cleaned up successfully")
+
+    async def cleanup_all_open_orders_rest(self):
+        """Query and cancel ALL open orders for this symbol using REST API - comprehensive startup cleanup"""
+        try:
+            from binance.spot import Spot
+            
+            # Create REST client to query all open orders
+            rest_client = Spot(
+                api_key=self.api_key,
+                api_secret=self.secret_key,
+                timeout=10
+            )
+            
+            self.logger.info("Querying all open orders via REST API for comprehensive cleanup...")
+            
+            # Get all open orders for this symbol
+            open_orders = rest_client.get_open_orders(symbol=self.symbol)
+            
+            if not open_orders:
+                self.logger.info("No open orders found via REST API")
+                self.open_orders.clear()  # Clear our tracking list too
+                return
+            
+            self.logger.warning(f"Found {len(open_orders)} open orders via REST API, cancelling all...")
+            
+            cancelled_count = 0
+            for order in open_orders:
+                try:
+                    order_id = str(order['orderId'])
+                    cancel_response = rest_client.cancel_order(
+                        symbol=self.symbol,
+                        orderId=int(order_id)
+                    )
+                    
+                    if cancel_response and 'orderId' in cancel_response:
+                        cancelled_count += 1
+                        self.logger.info(f"REST API cancelled order {order_id}")
+                        
+                        # Add to our tracking list if not already there
+                        if not any(o['id'] == order_id for o in self.open_orders):
+                            self.open_orders.append({
+                                'id': order_id,
+                                'symbol': self.symbol,
+                                'exchange': 'binance'
+                            })
+                    else:
+                        self.logger.error(f"Failed to cancel order {order_id} via REST API")
+                        
+                except Exception as e:
+                    error_msg = str(e)
+                    if "-2011" in error_msg:  # Order not found
+                        self.logger.info(f"Order {order['orderId']} already cancelled or filled")
+                    else:
+                        self.logger.error(f"Error cancelling order {order['orderId']}: {e}")
+            
+            # Clear our tracking list since we've cancelled everything
+            self.open_orders.clear()
+            self.logger.info(f"Comprehensive cleanup complete: {cancelled_count}/{len(open_orders)} orders cancelled")
+            
+        except Exception as e:
+            self.logger.error(f"Error during comprehensive REST cleanup: {e}")
+
+    async def _cleanup_orders_rest_fallback(self, failed_orders):
+        """Fallback method to cancel orders using REST API"""
+        try:
+            from binance.spot import Spot
+            
+            # Create REST client for emergency cleanup
+            rest_client = Spot(
+                api_key=self.api_key,
+                api_secret=self.secret_key,
+                timeout=10
+            )
+            
+            self.logger.info(f"Using REST API fallback to cancel {len(failed_orders)} orders")
+            
+            for order in failed_orders[:]:
+                try:
+                    cancel_response = rest_client.cancel_order(
+                        symbol=self.symbol,
+                        orderId=int(order['id'])
+                    )
+                    
+                    if cancel_response and 'orderId' in cancel_response:
+                        self.open_orders = [o for o in self.open_orders if o['id'] != order['id']]
+                        self.logger.info(f"REST API successfully cancelled order {order['id']}")
+                    else:
+                        self.logger.error(f"REST API cancel failed for order {order['id']}: Invalid response")
+                        
+                except Exception as e:
+                    error_msg = str(e)
+                    if "-2011" in error_msg:  # Order not found
+                        self.logger.info(f"Order {order['id']} already cancelled or filled (REST API)")
+                        self.open_orders = [o for o in self.open_orders if o['id'] != order['id']]
+                    else:
+                        self.logger.error(f"REST API cancel failed for order {order['id']}: {e}")
+                        
+        except Exception as e:
+            self.logger.error(f"REST API fallback initialization failed: {e}")
     
     def __del__(self):
         """Destructor to ensure cleanup when object is garbage collected"""
